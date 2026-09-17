@@ -30,6 +30,7 @@ Control Plane хранит единственное authoritative domain state. 
 - закрытые таблицы переходов `Campaign`, `FuzzJob`, `Task`, `Build` и `ExecutionAttempt` не расширяются состояниями Kubernetes, Kueue или иной инфраструктуры;
 - retry, pause, preemption и admission loss не переиспользуют terminal attempt: остановленная попытка получает `CANCELLED`, а разрешённый retry конечной `Task` возвращает её в `QUEUED` и создаёт новый `ExecutionAttempt`;
 - сборка имеет единственную цепочку `Build → build Task → ExecutionAttempt`; `Build` не создаёт параллельную попытку;
+- `Campaign` получает `COMPLETED_WITH_ERRORS`, когда полезное fuzzing-исполнение и результаты сохранены, но часть обязательных jobs завершилась невосстановимой ошибкой;
 - canonical corpus reference меняется только через compare-and-swap по expected snapshot identity и version;
 - `BackendResourceRef` остаётся opaque и не становится domain identity.
 
