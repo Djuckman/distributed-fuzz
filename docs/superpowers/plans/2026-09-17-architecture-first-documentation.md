@@ -169,9 +169,9 @@ FindingOccurrence → CrashReport → Finding
 
 Добавить отдельные таблицы transitions для Campaign, FuzzJob, ExecutionAttempt, Build и Task. В таблицах указывать current phase, trigger, next phase и обязательный side effect.
 
-Campaign должна различать desired states `RUNNING`, `PAUSED`, `STOPPED` и observed phases, включая `PAUSING`, `DEGRADED`, `COMPLETED_WITH_ERRORS` и `FAILED`. ExecutionAttempt должен иметь terminal phases `SUCCEEDED`, `FAILED`, `LOST`, `CANCELLED`.
+Создание Campaign должно сразу задавать desired=`RUNNING`; create-paused/create-stopped и draft lifecycle отсутствуют. Observed phases включают `PAUSING`, `COMPLETED_WITH_ERRORS` и `FAILED`, а временная деградация выражается conditions. ExecutionAttempt должен иметь terminal phases `SUCCEEDED`, `FAILED`, `LOST`, `CANCELLED`.
 
-Pause/preemption: checkpoint best effort до deadline, затем остановка независимо от результата; resume использует последний успешно опубликованный snapshot.
+Pause/preemption: checkpoint best effort до deadline, затем остановка независимо от результата; terminal/release только после остановки/fencing, resume использует последний успешно опубликованный snapshot.
 
 - [ ] **Step 5: Описать consistency и execution contracts**
 
@@ -191,7 +191,7 @@ Pause/preemption: checkpoint best effort до deadline, затем остано�
 
 Описать три уровня scheduling: Domain Scheduler, Resource Admission, Execution Backend. `ResourceLease` должен включать workload, tenant, resource request, priority и expiry. Preemption является поддерживаемым контрактом, даже если policy отключена.
 
-Описать immutable CorpusSnapshot, parent/checksums/compatibility key, private campaign snapshots и автоматический policy-driven `CorpusMergeTask` с ручным on-demand trigger.
+Описать immutable CorpusSnapshot, parent/checksums/compatibility key, optional private campaign snapshots и policy-driven `CorpusMergeTask` с ручным on-demand trigger; оба запускаются только при новом совместимом delta.
 
 - [ ] **Step 7: Описать coverage, findings и terminal semantics**
 

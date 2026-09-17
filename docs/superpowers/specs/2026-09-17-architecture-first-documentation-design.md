@@ -156,13 +156,13 @@ Workload → ResourceLease → ExecutionBackend
 - version для optimistic concurrency;
 - structured conditions с `reason`, `message` и `lastTransitionAt`.
 
-Campaign поддерживает desired states `RUNNING`, `PAUSED` и `STOPPED`. Observed phase отражает фактический процесс перехода, включая `BUILDING`, `QUEUED`, `PAUSING`, `DEGRADED` и terminal states.
+Создание Campaign сразу задаёт desired=`RUNNING`; create-paused, create-stopped и отдельный draft lifecycle не поддерживаются. `PAUSED` допустим только после первого полезного запуска. Observed phase отражает фактический процесс перехода, включая `BUILDING`, `QUEUED`, `PAUSING` и terminal states. Временная деградация выражается conditions, а не отдельной phase.
 
 Временная потеря одной попытки не переводит Campaign в `FAILED`. Частично успешная Campaign завершается как `COMPLETED_WITH_ERRORS`. `FAILED` означает, что Campaign не смогла получить полезное выполнение.
 
 ## Pause и preemption
 
-Pause и preemption выполняют checkpoint best effort до заданного deadline. После deadline workload останавливается независимо от результата checkpoint. Resume использует последний успешно опубликованный snapshot.
+Pause и preemption выполняют checkpoint best effort до заданного deadline. После deadline workload останавливается независимо от результата checkpoint; terminal attempt и release lease допустимы только после подтверждённой остановки/fencing. Resume использует последний успешно опубликованный snapshot.
 
 Preemption является частью архитектурного контракта, но конкретная policy может быть отключена реализацией.
 
@@ -180,7 +180,7 @@ SourceRevision + BuildRecipe
 - `BuildRecipe` содержит все значимые параметры сборки и ссылку на версию build environment.
 - `Build` является процессом со своим lifecycle.
 - `BuildArtifact` является immutable content-addressed результатом с digest и provenance.
-- `FuzzJob` и `ExecutionAttempt` ссылаются на точный `BuildArtifact`.
+- Потребляющие `FuzzJob`/Task и их `ExecutionAttempt` ссылаются на точный `BuildArtifact`; build attempt получает immutable source/recipe/environment inputs, а не будущий output digest.
 - Повторное использование определяется fingerprint всех значимых входов.
 - Между tenants artifacts и build cache по умолчанию не разделяются.
 
@@ -188,9 +188,9 @@ SourceRevision + BuildRecipe
 
 `Corpus` является логической именованной линией, а `CorpusSnapshot` — immutable manifest с checksums, parent snapshot, compatibility key и ссылкой на создавшую его попытку.
 
-Campaign публикует private snapshots. Несколько campaigns не изменяют общий mutable corpus.
+Полезная attempt Campaign может публиковать private snapshot; при отсутствии delta или неуспешном checkpoint snapshot может отсутствовать. Несколько campaigns не изменяют общий mutable corpus.
 
-Policy автоматически создаёт `CorpusMergeTask` по lifecycle event, интервалу или порогу накопленных изменений. Ручной запуск остаётся дополнительной возможностью. Merge/prune публикуют новый canonical snapshot атомарно; предыдущий snapshot сохраняется для rollback и retention policy.
+Policy автоматически создаёт `CorpusMergeTask` по lifecycle event, интервалу или порогу накопленных изменений только при наличии нового совместимого delta. Ручной запуск остаётся дополнительной возможностью и проходит тот же gate. Merge/prune публикуют новый canonical snapshot атомарно; предыдущий snapshot сохраняется для rollback и retention policy.
 
 ## Findings model
 
@@ -241,7 +241,7 @@ StopPolicy {
 
 Стагнация считается отдельно для каждого `FuzzJob`. Queue, build, pause, preemption и recovery не расходуют окно. Campaign завершается, когда все обязательные jobs завершились по stop policy или иному terminal condition.
 
-Coverage growth определяется стабильным множеством features/edges для совместимой instrumentation. При несовместимой смене `BuildArtifact` начинается новая coverage epoch.
+Coverage growth определяется стабильным множеством features/edges в пределах `coverageCompatibilityKey`. Смена `BuildArtifact` сама по себе не меняет epoch; новая epoch начинается только при несовместимом key.
 
 ## Command и reconciliation flow
 
