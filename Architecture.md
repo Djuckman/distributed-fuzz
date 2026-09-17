@@ -85,6 +85,7 @@ Control Plane владеет domain entities. Execution Backend владеет �
 ```text
 Tenant → Project → Campaign → FuzzJob → ExecutionAttempt
 Task → ExecutionAttempt
+Build → build Task → ExecutionAttempt
 FindingOccurrence → CrashReport → Finding
 ```
 
@@ -119,7 +120,9 @@ Desired state `Campaign` принимает только `RUNNING`, `PAUSED` и�
 | `CREATED` | desired=`RUNNING`, команда принята | `BUILDING` | Зафиксировать требуемые Build/Task и событие reconciliation |
 | `BUILDING` | обязательные artifacts готовы | `QUEUED` | Создать или активировать FuzzJob и admission-запросы |
 | `BUILDING` | часть recoverable build work неуспешна | `DEGRADED` | Сохранить conditions и запланировать допустимые retries |
+| `DEGRADED` | build retries успешно завершены | `QUEUED` | Очистить build condition и создать или активировать FuzzJob и admission-запросы |
 | `QUEUED` | обязательный FuzzJob начал полезное исполнение | `RUNNING` | Обновить `observedGeneration` и время активного выполнения |
+| `BUILDING` или `QUEUED` | desired=`PAUSED` | `PAUSING` | Приостановить создание новой работы, отменить pending admission и остановить активные finite tasks по общему pause contract |
 | `RUNNING` или `DEGRADED` | desired=`PAUSED` | `PAUSING` | Запросить checkpoint всех активных workloads с deadline |
 | `PAUSING` | workloads остановлены или deadline истёк | `PAUSED` | Освободить leases и сохранить ссылки на последние опубликованные snapshots |
 | `PAUSED` | desired=`RUNNING` | `QUEUED` | Запросить новые leases и указать последние успешные snapshots |
@@ -129,7 +132,7 @@ Desired state `Campaign` принимает только `RUNNING`, `PAUSED` и�
 | `RUNNING` или `DEGRADED` | полезное исполнение было, но есть невосстановимые ошибки обязательных jobs | `COMPLETED_WITH_ERRORS` | Зафиксировать успешные результаты и перечень ошибок |
 | `BUILDING`, `QUEUED` или `DEGRADED` | полезное исполнение невозможно и recovery исчерпан | `FAILED` | Зафиксировать причины и отменить оставшуюся работу |
 | `RUNNING` | временная потеря части capacity или попытки | `DEGRADED` | Начать recovery, не теряя intent Campaign |
-| `DEGRADED` | требуемая capacity восстановлена | `RUNNING` | Очистить временную condition после подтверждения |
+| `DEGRADED` | capacity восстановлена и обязательный FuzzJob снова исполняется | `RUNNING` | Очистить capacity condition после подтверждения исполнения |
 
 ### FuzzJob
 
@@ -155,12 +158,11 @@ Desired state `Campaign` принимает только `RUNNING`, `PAUSED` и�
 | `PENDING` | lease и входы подтверждены | `STARTING` | Идемпотентно запросить запуск у Execution Backend |
 | `STARTING` | backend подтвердил готовность workload | `RUNNING` | Сохранить opaque `BackendResourceRef` и start time |
 | `PENDING` или `STARTING` | запуск отменён до готовности | `CANCELLED` | Освободить lease и записать terminal event |
-| `RUNNING` | workload штатно завершил конечную работу | `SUCCEEDED` | Сохранить outputs и освободить lease |
+| `RUNNING` | конечный workload опубликовал все обязательные outputs | `SUCCEEDED` | Сохранить output references и освободить lease |
 | `RUNNING` | workload сообщил ошибку | `FAILED` | Сохранить diagnostics и освободить lease |
 | `STARTING` или `RUNNING` | backend resource потерян или observation протухло | `LOST` | Зафиксировать последний snapshot reference и освободить lease |
 | `RUNNING` | stop, pause или preemption требует остановки | `STOPPING` | Запросить best-effort checkpoint с deadline |
-| `STOPPING` | остановка после успешного checkpoint | `SUCCEEDED` | Опубликовать snapshot до terminal event и освободить lease |
-| `STOPPING` | workload остановлен без требуемого результата | `CANCELLED` | Сохранить причину и последний ранее опубликованный snapshot |
+| `STOPPING` | backend подтвердил остановку или deadline истёк | `CANCELLED` | Сохранить structured reason, результат checkpoint и последний опубликованный resumable state; освободить lease |
 
 `SUCCEEDED`, `FAILED`, `LOST` и `CANCELLED` — terminal phases `ExecutionAttempt`. Retry всегда создаёт новый `ExecutionAttempt`.
 
@@ -168,10 +170,12 @@ Desired state `Campaign` принимает только `RUNNING`, `PAUSED` и�
 
 | Current phase | Trigger | Next phase | Обязательный side effect |
 |---|---|---|---|
-| `PENDING` | входы разрешены и Task допущена | `RUNNING` | Создать ExecutionAttempt build-задачи |
-| `RUNNING` | artifact опубликован и digest проверен | `SUCCEEDED` | Атомарно связать Build с BuildArtifact и provenance |
-| `PENDING` или `RUNNING` | отмена владельцем | `CANCELLED` | Остановить активную попытку и сохранить причину |
-| `RUNNING` | невосстановимая ошибка или retries исчерпаны | `FAILED` | Сохранить diagnostics и оповестить зависимые jobs |
+| `PENDING` | связанная build Task вошла в `RUNNING` | `RUNNING` | Сохранить ссылку на build Task и наблюдать её результат, не создавая отдельную попытку |
+| `RUNNING` | build Task получила `SUCCEEDED`, artifact опубликован и digest проверен | `SUCCEEDED` | Атомарно связать Build с BuildArtifact, Task, ExecutionAttempt и provenance |
+| `PENDING` или `RUNNING` | отмена владельцем | `CANCELLED` | Запросить явную отмену build Task и сохранить причину |
+| `RUNNING` | build Task получила `FAILED` после исчерпания retries | `FAILED` | Сохранить diagnostics и оповестить зависимые jobs |
+
+Цепочка исполнения сборки однозначна: `Build → build Task → ExecutionAttempt`. Только build Task создаёт и владеет `ExecutionAttempt`; Build наблюдает lifecycle Task и её результат.
 
 ### Task
 
@@ -180,11 +184,12 @@ Desired state `Campaign` принимает только `RUNNING`, `PAUSED` и�
 | `PENDING` | зависимости готовы | `QUEUED` | Создать admission-запрос с tenant context |
 | `QUEUED` | ResourceLease выдан | `RUNNING` | Создать новый ExecutionAttempt |
 | `RUNNING` | обязательные outputs опубликованы | `SUCCEEDED` | Сохранить output references и освободить lease |
-| `RUNNING` | попытка потеряна, retry разрешён | `QUEUED` | Завершить попытку как `LOST` и запросить новый lease |
-| `PENDING`, `QUEUED` или `RUNNING` | отмена владельцем | `CANCELLED` | Прекратить дальнейшие retries и освободить lease |
+| `RUNNING` | попытка завершилась `LOST` или recoverable `FAILED`, retry разрешён | `QUEUED` | Сохранить причину retry и запросить новый lease; следующий запуск создаёт новый ExecutionAttempt |
+| `RUNNING` | pause, preemption, admission loss или infrastructure cancellation завершили попытку как `CANCELLED`, retry разрешён | `QUEUED` | Сохранить опубликованный resumable state при его наличии; новый admission запрещён, пока действует pause intent владельца |
+| `PENDING`, `QUEUED` или `RUNNING` | явная отмена владельцем | `CANCELLED` | Прекратить дальнейшие retries и освободить lease |
 | `RUNNING` | невосстановимая ошибка или retries исчерпаны | `FAILED` | Сохранить diagnostics и уведомить владельца Task |
 
-Pause и preemption используют checkpoint best effort до заданного deadline. После deadline workload останавливается независимо от результата checkpoint. Resume использует последний успешно опубликованный `CorpusSnapshot`, а не локальное неподтверждённое состояние остановленной попытки.
+Pause и preemption используют checkpoint best effort до заданного deadline для workload, который объявляет checkpoint capability. После deadline workload останавливается независимо от результата checkpoint, а его `ExecutionAttempt` завершается как `CANCELLED` со structured reason `PAUSED` или `PREEMPTED`; успешный checkpoint не означает `SUCCEEDED`. Resume FuzzJob использует последний успешно опубликованный `CorpusSnapshot`, а не локальное неподтверждённое состояние остановленной попытки. Остановленная pause конечная Task остаётся в `QUEUED` без admission, пока действует pause intent её владельца. Retry Task использует опубликованный resumable state, только если её contract объявляет его совместимым; иначе новая попытка начинает работу заново из immutable inputs.
 
 ## 8. Команды, события и reconciliation
 
@@ -229,6 +234,8 @@ Artifacts и build cache разных tenants по умолчанию изоли
 
 Retry всегда создаёт новый `ExecutionAttempt` с новым identity и ссылкой на предыдущую попытку как причину retry. Одновременно активные попытки одного workload допустимы только при явной policy и уникальных ownership scopes для outputs.
 
+`ExecutionAttempt` получает `SUCCEEDED` только после естественного завершения конечного workload и публикации всех обязательных outputs. Остановка из-за pause, preemption или admission loss всегда даёт текущей попытке `CANCELLED`; владеющий FuzzJob или Task отдельно решает, перейти ли в paused state, вернуться в queue или завершиться по policy.
+
 `BackendResourceRef` является opaque значением адаптера. Его структура, namespace и lifecycle не проникают в domain semantics, пользовательские identifiers или правила переходов. Control Plane сопоставляет observations с попыткой и игнорирует события для неизвестной или terminal попытки, кроме audit.
 
 Execution Backend обязан поддерживать идемпотентные операции start, observe, checkpoint и stop, а также объявлять capabilities. Отсутствующая capability проверяется до admission; адаптер не имитирует неподдерживаемую семантику.
@@ -253,11 +260,11 @@ Domain Scheduler → Resource Admission → Execution Backend
 
 Запуск без действующего lease запрещён. Lease имеет expiry, продлевается явно и освобождается при terminal attempt, отмене или подтверждённой потере. Истечение lease прекращает право на ресурсы и запускает reconciliation; оно не стирает attempt history.
 
-Preemption является поддерживаемым архитектурным контрактом, даже если policy конкретной реализации отключена. При preemption Resource Admission отзывает lease с deadline, Control Plane запрашивает checkpoint best effort, затем Execution Backend останавливает workload независимо от результата checkpoint. Освобождённый FuzzJob возобновляется с последнего успешно опубликованного snapshot.
+Preemption является поддерживаемым архитектурным контрактом, даже если policy конкретной реализации отключена. При preemption Resource Admission отзывает lease с deadline, Control Plane запрашивает checkpoint best effort для поддерживающего его workload, затем Execution Backend останавливает workload независимо от результата checkpoint. Текущий ExecutionAttempt получает `CANCELLED` с причиной `PREEMPTED`. Освобождённый FuzzJob возобновляется с последнего успешно опубликованного snapshot. Конечная Task при разрешённом retry переходит в `QUEUED`: новая попытка использует совместимый опубликованный resumable state либо начинает работу из immutable inputs.
 
 ## 12. Corpus и snapshots
 
-`Corpus` — именованная логическая линия для пары Project/FuzzTarget и заданного compatibility scope. Он указывает на canonical snapshot, но не является общей mutable директорией.
+`Corpus` — именованная логическая линия для пары Project/FuzzTarget и заданного compatibility scope. Он указывает на canonical snapshot через версионированную ссылку, но не является общей mutable директорией.
 
 `CorpusSnapshot` — immutable manifest, который содержит:
 
@@ -269,7 +276,7 @@ Preemption является поддерживаемым архитектурн�
 
 Каждая Campaign публикует private campaign snapshots. Несколько Campaign не изменяют один общий mutable corpus. Snapshot становится доступен для resume только после полной публикации manifest и проверки checksums.
 
-Policy автоматически создаёт `CorpusMergeTask` по lifecycle event, интервалу или порогу накопленных изменений. Ручной on-demand trigger создаёт ту же Task и проходит те же authorization, admission и audit rules. Merge/prune читает immutable inputs, публикует новый snapshot и атомарно переводит canonical reference; предыдущий canonical snapshot сохраняется согласно rollback и retention policy.
+Policy автоматически создаёт `CorpusMergeTask` по lifecycle event, интервалу или порогу накопленных изменений. Ручной on-demand trigger создаёт ту же Task и проходит те же authorization, admission и audit rules. Merge/prune фиксирует expected canonical snapshot identity и version, читает immutable inputs и публикует новый snapshot. Затем `CorpusStore` выполняет compare-and-swap (CAS) canonical reference только при совпадении ожидаемых identity и version. При CAS conflict новый snapshot не заменяет текущую ссылку: Task перечитывает новый canonical snapshot, повторно вычисляет merge с его содержимым и повторяет публикацию в пределах retry policy. Предыдущий canonical snapshot сохраняется согласно rollback и retention policy.
 
 Несовместимый compatibility key запрещает silent merge или resume. Требуется новая corpus line либо явная преобразующая Task, результат которой имеет новый key и provenance.
 
@@ -342,10 +349,10 @@ Domain modules зависят от портов, а adapters реализуют 
 |---|---|
 | Repositories (`TenantRepository`, `ProjectRepository`, `CampaignRepository`, `WorkloadRepository`, `FindingRepository`) | Загружать и атомарно сохранять tenant-scoped aggregates с optimistic concurrency; поддерживать изменение desired state вместе с durable event |
 | `EventPublisher` | Публиковать сохранённые domain events с семантикой at least once, сохраняя aggregate identity и sequence |
-| `BuildExecutor` | Запускать, наблюдать и отменять Build по immutable inputs; возвращать provenance и artifact digest |
+| `BuildExecutor` | Выполнять build operation по immutable inputs внутри ExecutionAttempt, принадлежащего build Task; возвращать provenance и artifact digest, не создавая попытку от имени Build |
 | `ExecutionBackend` | Идемпотентно start/observe/checkpoint/stop workload; возвращать capabilities и opaque `BackendResourceRef` |
 | `ResourceAdmission` | Выдавать, продлевать, отзывать и освобождать `ResourceLease` по quotas, priority и policy |
-| `CorpusStore` | Публиковать и читать immutable snapshots, проверять checksums и атомарно менять canonical reference |
+| `CorpusStore` | Публиковать и читать immutable snapshots, проверять checksums и менять canonical reference через compare-and-swap по expected snapshot identity и version |
 | `ArtifactStore` | Публиковать и читать content-addressed artifacts с integrity и tenant authorization |
 | `CoverageAnalyzer` | Нормализовать coverage в совместимой epoch и определять growth без backend-specific semantics |
 | `FindingNormalizer` | Создавать версионированный CrashReport из immutable occurrence, не изменяя source fact |
@@ -363,11 +370,12 @@ Domain modules зависят от портов, а adapters реализуют 
 | Сбой | Обнаружение | Обязательная реакция | Recovery/результат |
 |---|---|---|---|
 | Потеря backend resource | Not-found, expired observation или подтверждённая потеря | Завершить текущий ExecutionAttempt как `LOST`, освободить lease, сохранить diagnostics | При сохраняющемся intent запросить новый lease и создать новый ExecutionAttempt с последним snapshot |
-| Checkpoint failure | Ошибка публикации или deadline | Записать condition; после deadline остановить workload независимо от результата | Resume использует последний успешно опубликованный snapshot; локальный partial checkpoint игнорируется |
+| Checkpoint failure | Ошибка публикации или deadline | Записать condition; после deadline остановить workload и завершить попытку как `CANCELLED` независимо от результата | FuzzJob использует последний успешно опубликованный snapshot; Task при retry использует совместимый resumable state либо immutable inputs; локальный partial checkpoint игнорируется |
 | Duplicate event | Уже обработанный event identity или sequence | Вернуть сохранённый логический результат без повторного side effect | Продолжить обработку последующих событий; факт duplicate доступен в telemetry |
 | Stale update | Старая generation, version или terminal attempt | Отклонить изменение authoritative state | Перечитать aggregate; новое observed state принимается только после reconciliation |
-| Admission loss | Lease отозван, истёк или не может быть продлён | Прекратить право на исполнение, инициировать checkpoint/stop и освободить запись lease | Workload возвращается в queue или завершается по policy; новый запуск требует нового lease и attempt |
+| Admission loss | Lease отозван, истёк или не может быть продлён | Прекратить право на исполнение, инициировать checkpoint/stop, завершить текущую попытку как `CANCELLED` и освободить запись lease | FuzzJob начинает recovery, а Task с разрешённым retry переходит в `QUEUED`; новый запуск требует нового lease и нового ExecutionAttempt |
 | Недоступность artifact storage | Timeout или failed integrity/readiness check | Не объявлять Build/Task успешной и не публиковать partial reference | Повторять в пределах policy; при исчерпании завершить работу ошибкой, не повреждая прежний artifact |
+| Corpus canonical conflict | CAS обнаружил несовпадение expected snapshot identity или version | Не изменять canonical reference и перечитать актуальный snapshot | Повторно вычислить merge с новым canonical input и повторить CAS в пределах retry policy |
 
 ## 19. Архитектурные инварианты
 
@@ -381,11 +389,12 @@ Domain modules зависят от портов, а adapters реализуют 
 8. `observedGeneration` никогда не опережает `generation`, а stale update не откатывает более новое или terminal состояние.
 9. FuzzJob и Task не запускаются без действующего ResourceLease того же Tenant и совместимого resource request.
 10. BuildArtifact и CorpusSnapshot immutable, content-verified и становятся видимыми только после полной успешной публикации.
-11. FuzzJob и ExecutionAttempt всегда ссылаются на точный BuildArtifact; provenance ведёт к SourceRevision и BuildRecipe.
-12. Resume использует только последний успешно опубликованный совместимый CorpusSnapshot.
-13. Окно `noCoverageGrowthFor` считается по active time отдельно для каждого FuzzJob и не включает queue, build, pause, preemption или recovery.
-14. Несовместимая instrumentation начинает новую coverage epoch и не смешивает baseline с предыдущей epoch.
-15. FindingOccurrence неизменяем; CrashReport и deduplication decisions версионированы; повтор исправленной проблемы может создать `REOPENED`.
-16. Временная потеря одной попытки не переводит Campaign в `FAILED`; terminal outcome вычисляется по полезному исполнению и обязательным jobs.
-17. Pause и preemption останавливают workload после deadline независимо от успеха checkpoint.
-18. Ни один workload не получает credentials Control Plane и не может самостоятельно ослабить `ExecutionPolicy`.
+11. Canonical CorpusSnapshot меняется только через CAS по expected snapshot identity и version; conflict не заменяет ссылку и требует повторного merge с актуальным canonical input.
+12. FuzzJob и ExecutionAttempt всегда ссылаются на точный BuildArtifact; provenance ведёт к SourceRevision и BuildRecipe.
+13. Resume использует только последний успешно опубликованный совместимый CorpusSnapshot.
+14. Окно `noCoverageGrowthFor` считается по active time отдельно для каждого FuzzJob и не включает queue, build, pause, preemption или recovery.
+15. Несовместимая instrumentation начинает новую coverage epoch и не смешивает baseline с предыдущей epoch.
+16. FindingOccurrence неизменяем; CrashReport и deduplication decisions версионированы; повтор исправленной проблемы может создать `REOPENED`.
+17. Временная потеря одной попытки не переводит Campaign в `FAILED`; terminal outcome вычисляется по полезному исполнению и обязательным jobs.
+18. Pause и preemption останавливают workload после deadline независимо от успеха checkpoint.
+19. Ни один workload не получает credentials Control Plane и не может самостоятельно ослабить `ExecutionPolicy`.
