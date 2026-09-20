@@ -142,7 +142,7 @@ sequenceDiagram
     Note over P: Reconciler посчитал:<br/>target X требует N ресурсов
     P->>K: Создать Pod со scheduling gate<br/>("пока не трогать")
     P->>Q: Зарегистрировать Workload<br/>на N ресурсов в очереди tenant
-    Note over Q: Kueue проверяет квоту,<br/>capacity и приоритет;<br/>может вытеснить менее<br/>приоритетную работу
+    Note over Q: Kueue проверяет квоту,<br/>capacity и приоритет,<br/>может вытеснить менее<br/>приоритетную работу
     Q->>K: Снять scheduling gate<br/>(место найдено)
     Note over K: Только теперь штатный<br/>Kubernetes-планировщик<br/>выбирает ноду и запускает под
     K-->>P: Pod запущен (UID)
