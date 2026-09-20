@@ -14,7 +14,7 @@
 
 - Управлять распределёнными fuzzing-кампаниями как долгоживущими domain entities.
 - Разделять пользовательский intent, авторитетное состояние и физическое исполнение.
-- Обеспечивать tenant isolation, воспроизводимость сборок и трассируемость результатов.
+- Обеспечивать авторизованный доступ к Project, воспроизводимость сборок и трассируемость результатов.
 - Восстанавливать полезную работу после потери вычислительных ресурсов без потери domain history.
 - Поддерживать finite tasks и непрерывный fuzzing через общий execution contract.
 - Формализовать scheduling, admission, preemption, corpus, coverage и findings без привязки к технологии.
@@ -43,37 +43,38 @@
 2. intent сохраняется до вызова внешнего адаптера;
 3. внешние вызовы и обработка событий идемпотентны;
 4. immutable facts и artifacts не переписываются;
-5. tenant context обязателен на каждой границе;
-6. восстановление выполняется reconciliation, а не изменением истории;
-7. длительные операции асинхронны относительно API.
+5. восстановление выполняется reconciliation, а не изменением истории;
+6. длительные операции асинхронны относительно API.
 
-## 4. Trust boundaries и multi-tenancy
+## 4. Access control
 
-Платформа рассматривает tenants как взаимно недоверенные стороны, а пользовательский код — как недоверенный workload. Основные trust boundaries проходят между клиентом и Control Plane, Control Plane и adapters, workload и Control Plane, workload и storage, а также между workloads разных tenants.
+Платформа исполняет доверенный код в едином trust domain: запускаемый fuzzing-workload не рассматривается как источник угрозы, отдельной изоляции между запусками не требуется.
 
-`Tenant` является верхней границей владения и изоляции. `Team` группирует субъектов внутри одного Tenant. `Membership` связывает identity с Team и ролью. Team получает явно заданную роль для Project; принадлежность к Tenant сама по себе не даёт доступ ко всем Project.
+Доступ к данным и операциям авторизуется на уровне `Project`. `User` — идентичность, подтверждённая `IdentityProvider`. `Group` объединяет несколько `User`; `Membership` связывает `User` и `Group` без собственной роли. `ProjectAccessGrant` связывает `Group` и конкретный `Project` и несёт два поля: `revisionAllowList` — допустимые для запуска revision/ref-паттерны исходного кода (по умолчанию только `master`), и `capabilities` — разрешённые действия в этом Project (как минимум `RUN_CAMPAIGN`, `MANAGE_OTHERS_CAMPAIGN`, `TRIAGE_FINDINGS`, `MANAGE_ACCESS`).
 
-Каждый `Project` принадлежит ровно одному `Tenant`. Межtenant-доступ запрещён, включая чтение metadata, artifacts, corpus, findings, telemetry и audit records. Любая команда, событие, ключ хранения, lease и backend operation обязаны нести проверенный tenant context. Делегирование доступа возможно только внутри Tenant и фиксируется audit event.
+Создание `Campaign` на `SourceRevision` X в `Project` P требует, чтобы пользователь состоял в `Group`, имеющей `ProjectAccessGrant` на P с capability `RUN_CAMPAIGN`, и чтобы X попадал в `revisionAllowList` этого grant. Другие операции (pause/stop чужой Campaign, изменение triage state Finding, изменение самих grants) проверяются по соответствующей capability аналогично.
 
-Control Plane владеет domain entities. Execution Backend владеет лишь своими физическими ресурсами и их telemetry. Artifact и corpus adapters хранят bytes и manifests, но их domain ownership и права доступа определяет Control Plane.
+Control Plane владеет всеми domain entities. Execution Backend владеет лишь своими физическими ресурсами и их telemetry. Artifact и corpus adapters хранят bytes и manifests, но их domain ownership и права доступа определяет Control Plane.
 
 ## 5. Domain model
 
 | Сущность | Назначение | Владелец |
 |---|---|---|
-| `Tenant` | Верхняя граница изоляции, quotas и политик | Control Plane; корневой aggregate |
-| `Team` | Группа субъектов одного Tenant | `Tenant` |
-| `Membership` | Версионированная связь identity, Team и роли | `Tenant` |
-| `Project` | Контекст исходного кода, targets, политик и доступа | `Tenant` |
+| `Project` | Контекст исходного кода, targets, campaigns, corpus и доступа | Control Plane; корневой aggregate |
+| `User` | Identity, подтверждённая `IdentityProvider` | — |
+| `Group` | Набор `User` | Control Plane |
+| `Membership` | Связь `User` и `Group`, без собственной роли | `Group` |
+| `ProjectAccessGrant` | Связь `Group` и `Project`: `revisionAllowList` и `capabilities` | `Project` |
 | `SourceRevision` | Разрешённая immutable-ревизия исходного кода | `Project` |
 | `FuzzTarget` | Адресуемая fuzzing-точка входа и её runtime contract | `Project` |
-| `Campaign` | Пользовательская единица управления запуском | `Project` |
+| `Campaign` | Пользовательская единица управления запуском; ровно один `Project` | `Project` |
+| `CampaignBatch` | Необязательная группировка нескольких `Campaign` (в т.ч. из разных `Project`) только для совместного просмотра статуса/находок | Control Plane |
 | `FuzzJob` | Логическая непрерывная задача одного target в Campaign | `Campaign` |
 | `Build` | Процесс получения artifacts для revision и recipe | `Project` |
 | `BuildArtifact` | Immutable content-addressed результат Build | Исходный `Build`, фактически опубликовавший artifact; cache-hit Builds только ссылаются на него |
 | `Task` | Конечная работа: build, reproduce, minimize, normalization, coverage, corpus merge/prune, regression analysis или fix verification | Сущность, которая запросила работу; ссылка обязательна |
 | `ExecutionAttempt` | Одна историческая попытка физического выполнения FuzzJob или Task | Соответствующий `FuzzJob` или `Task` |
-| `ResourceLease` | Ограниченное по времени admission-разрешение на ресурсы | Resource Admission от имени `Tenant` |
+| `ResourceLease` | Ограниченное по времени admission-разрешение на ресурсы | Resource Admission от имени `Project` |
 | `Corpus` | Именованная логическая линия входных данных | `Project` и `FuzzTarget` |
 | `CorpusSnapshot` | Immutable manifest конкретного состояния Corpus | `Corpus` |
 | `FindingOccurrence` | Immutable-факт обнаружения с raw artifacts | `FuzzJob` и породивший `ExecutionAttempt` |
@@ -83,13 +84,14 @@ Control Plane владеет domain entities. Execution Backend владеет �
 Обязательные отношения владения и происхождения:
 
 ```text
-Tenant → Project → Campaign → FuzzJob → ExecutionAttempt
+Project → Campaign → FuzzJob → ExecutionAttempt
 Task → ExecutionAttempt
 Build → build Task → ExecutionAttempt  (только при фактическом исполнении)
 FindingOccurrence → CrashReport → Finding
+Group → ProjectAccessGrant → Project
 ```
 
-`Campaign` фиксирует выбранные targets, `SourceRevision`, build parameters, resource policy и stop policy. `FuzzJob` не привязан к worker или размещению. `ExecutionAttempt` является попыткой выполнения, а не зеркалом backend resource. Физический идентификатор хранится только как opaque `BackendResourceRef`.
+`Campaign` фиксирует выбранные targets, `SourceRevision`, build parameters, resource policy и stop policy. `FuzzJob` не привязан к worker или размещению. `ExecutionAttempt` является попыткой выполнения, а не зеркалом backend resource. Физический идентификатор хранится только как opaque `BackendResourceRef`. `CampaignBatch` не владеет `FuzzJob` и не участвует в lifecycle входящих `Campaign` — это client-facing группировка для совместного просмотра.
 
 `BuildRecipe` — immutable value object со всеми значимыми параметрами сборки и ссылкой на версию build environment. Он не является самостоятельно управляемым aggregate.
 
@@ -103,7 +105,7 @@ FindingOccurrence → CrashReport → Finding
 - `observedGeneration`, до которого reconciler подтвердил обработку;
 - version token для optimistic concurrency;
 - structured conditions с `reason`, `message` и `lastTransitionAt`;
-- tenant и owner references, проверяемые при каждом изменении.
+- owner references, проверяемые при каждом изменении.
 
 Запись observed state принимается только при совпадении version token и применимой `generation`. Устаревшее наблюдение не откатывает более новое состояние. Конфликт optimistic concurrency заставляет обработчик перечитать aggregate и повторно оценить intent.
 
@@ -173,7 +175,7 @@ Opaque `BackendResourceRef` сохраняется в фазе `STARTING` сра
 
 | Текущая фаза | Условие | Следующая фаза | Обязательный эффект |
 |---|---|---|---|
-| `PENDING` | найден verified tenant-accessible cache hit | `SUCCEEDED` | Связать Build с существующим BuildArtifact и его provenance без новой Task/попытки |
+| `PENDING` | найден verified cache hit | `SUCCEEDED` | Связать Build с существующим BuildArtifact и его provenance без новой Task/попытки |
 | `PENDING` | связанная build Task вошла в `RUNNING` | `RUNNING` | Сохранить ссылку на build Task и наблюдать её результат, не создавая отдельную попытку |
 | `RUNNING` | build Task получила `SUCCEEDED`, artifact опубликован и digest проверен | `SUCCEEDED` | Атомарно связать Build с BuildArtifact, Task, ExecutionAttempt и provenance |
 | `PENDING` или `RUNNING` | отмена владельцем и build Task/attempt подтверждённо завершена либо отсутствует | `CANCELLED` | Сохранить причину и terminal event после quiescence дочерней работы |
@@ -186,7 +188,7 @@ Reconciler Build в `PENDING` сначала выполняет идемпоте
 | Текущая фаза | Условие | Следующая фаза | Обязательный эффект |
 |---|---|---|---|
 | `PENDING` | обязательная зависимость terminal и недоступна | `FAILED` | Сохранить dependency condition и не создавать admission-запрос |
-| `PENDING` | зависимости готовы | `QUEUED` | Создать admission-запрос с tenant context |
+| `PENDING` | зависимости готовы | `QUEUED` | Создать admission-запрос с project context |
 | `QUEUED` | ResourceLease выдан | `RUNNING` | Создать новый ExecutionAttempt |
 | `QUEUED` | permanent admission или policy rejection запрещает исполнение | `FAILED` | Сохранить structured rejection и terminal event; отменить admission-запрос и дальнейшие retries |
 | `RUNNING` | текущая попытка `SUCCEEDED`, обязательные outputs опубликованы, lease освобождён | `SUCCEEDED` | Сохранить output references и terminal event |
@@ -225,13 +227,11 @@ Reconciler вычисляет действия из authoritative desired state 
 SourceRevision + BuildRecipe → Build → BuildArtifact
 ```
 
-`SourceRevision` разрешается в immutable identity до начала Build. Fingerprint Build включает revision, все значимые поля `BuildRecipe`, target, архитектуру выполнения и совместимость instrumentation. Одинаковый fingerprint может переиспользовать только artifact, доступный тому же Tenant и прошедший integrity check.
+`SourceRevision` разрешается в immutable identity до начала Build. Fingerprint Build включает revision, все значимые поля `BuildRecipe`, target, архитектуру выполнения и совместимость instrumentation. Одинаковый fingerprint может переиспользовать только artifact, прошедший integrity check.
 
-`BuildArtifact` является immutable и content-addressed: его `artifactDigest` является provenance identity содержимого. Provenance связывает artifact с Tenant, Project, SourceRevision, BuildRecipe, исходными Build, Task/ExecutionAttempt и временем публикации. Cache-hit Build ссылается на этот artifact и исходный provenance, не приписывая себе его создание. Потребляющие `FuzzJob`, reproduce/analysis Task и принадлежащие им `ExecutionAttempt` до запуска ссылаются на точный `artifactDigest`.
+`BuildArtifact` является immutable и content-addressed: его `artifactDigest` является provenance identity содержимого. Provenance связывает artifact с Project, SourceRevision, BuildRecipe, исходными Build, Task/ExecutionAttempt и временем публикации. Cache-hit Build ссылается на этот artifact и исходный provenance, не приписывая себе его создание. Потребляющие `FuzzJob`, reproduce/analysis Task и принадлежащие им `ExecutionAttempt` до запуска ссылаются на точный `artifactDigest`.
 
 Build Task и её `ExecutionAttempt` производят `BuildArtifact`, поэтому до успешной публикации не могут ссылаться на его будущий `artifactDigest` как на input. Их обязательные immutable inputs — `SourceRevision`, `BuildRecipe`, ссылка на build environment и остальные входные references. Только после проверки и публикации output digest становится результатом Task и связывается с Build.
-
-Artifacts и build cache разных tenants по умолчанию изолированы. Любое ослабление изоляции требует отдельного явно разрешённого policy с проверяемым отсутствием утечки; базовый контракт не требует такого совместного использования.
 
 Публикация считается успешной только после проверки digest и доступности manifest. Частично записанный artifact не становится видимым через domain state.
 
@@ -262,7 +262,7 @@ Domain Scheduler → Resource Admission → Execution Backend
 `ResourceLease` обязан включать:
 
 - ссылку на workload (`FuzzJob` или `Task`);
-- `tenantId` и при необходимости `projectId`;
+- `projectId`;
 - нормализованный resource request;
 - priority и policy decision reference;
 - `issuedAt`, `expiresAt` и уникальный lease identity.
@@ -280,7 +280,7 @@ Preemption является поддерживаемым архитектурн�
 - собственный digest и checksums каждого объекта;
 - optional parent snapshot;
 - `corpusCompatibilityKey` для target, runtime input format и corpus schema, не подменяющий artifact identity или coverage compatibility;
-- Tenant, Project, Corpus и creator ExecutionAttempt;
+- Project, Corpus и creator ExecutionAttempt;
 - список content-addressed объектов и metadata публикации.
 
 Полезная ExecutionAttempt Campaign может публиковать private campaign snapshot; при отсутствии новых данных или неуспешном checkpoint snapshot может отсутствовать. Несколько Campaign не изменяют один общий mutable corpus. Snapshot становится доступен для resume только после полной публикации manifest и проверки checksums.
@@ -317,7 +317,7 @@ Campaign получает:
 FindingOccurrence → CrashReport → Finding
 ```
 
-`FindingOccurrence` неизменяемо фиксирует момент обнаружения, Tenant, Project, FuzzJob, ExecutionAttempt, artifact digest, input и raw outputs. Повторная обработка не изменяет occurrence.
+`FindingOccurrence` неизменяемо фиксирует момент обнаружения, Project, FuzzJob, ExecutionAttempt, artifact digest, input и raw outputs. Повторная обработка не изменяет occurrence.
 
 `FindingNormalizer` создаёт новый `CrashReport` с `normalizerName`, `normalizerVersion`, normalized stack, classification и ссылками на inputs. Смена версии нормализатора создаёт новый report и сохраняет прежние результаты для объяснимости.
 
@@ -327,21 +327,15 @@ FindingOccurrence → CrashReport → Finding
 
 ## 15. Security requirements
 
-Каждая операция аутентифицируется, авторизуется в tenant/project scope и оставляет audit event для security-sensitive изменений. Workload не получает credentials Control Plane и не может выбирать tenant context, lease, isolation class или backend reference.
+Каждая операция аутентифицируется, авторизуется через `ProjectAccessGrant` в scope конкретного `Project` и оставляет audit event для security-sensitive изменений. Workload не получает credentials Control Plane и не может выбирать lease или backend reference.
 
-`ExecutionPolicy` задаёт запрошенный класс изоляции и ограничения capabilities. Поддерживаются классы:
+Запускаемый fuzzing-код рассматривается как доверенный: платформа не выбирает и не применяет отдельный класс изоляции workload, sandbox implementation или runtime restrictions поверх стандартного исполнения в кластере.
 
-- `STANDARD` — базовая изоляция недоверенного workload;
-- `STRONG` — усиленная изоляция для повышенного риска;
-- `DEDICATED` — исключительное размещение в выделенном security scope.
-
-Архитектура не выбирает sandbox implementation. Execution Backend обязан либо доказуемо применить требуемый класс, либо отклонить запуск до исполнения. Понижение класса без новой авторизованной команды запрещено.
-
-Secrets передаются workload только в минимально необходимом scope, не сохраняются в artifacts, logs или corpus и имеют ограниченный срок действия. Все storage operations проверяют tenant ownership; content address сам по себе не даёт права чтения.
+Secrets передаются workload только в минимально необходимом scope, не сохраняются в artifacts, logs или corpus и имеют ограниченный срок действия. Все storage operations проверяют ownership на уровне `Project`; content address сам по себе не даёт права чтения.
 
 ## 16. Observability
 
-Платформа обязана предоставлять metrics, structured logs, distributed traces и audit events с согласованными correlation identifiers: `tenantId`, `projectId`, aggregate identity, `taskId`/`fuzzJobId`, `executionAttemptId` и operation identity.
+Платформа обязана предоставлять metrics, structured logs, distributed traces и audit events с согласованными correlation identifiers: `projectId`, aggregate identity, `taskId`/`fuzzJobId`, `executionAttemptId` и operation identity.
 
 Telemetry разделяется на два класса:
 
@@ -350,7 +344,7 @@ Telemetry разделяется на два класса:
 
 Metrics labels обязаны иметь ограниченную cardinality. Нельзя использовать raw input, stack trace, artifact digest, backend resource identity или произвольный пользовательский текст как неограниченный label. Высококардинальные данные помещаются в структурированные logs или trace attributes с retention и access policy.
 
-Audit events неизменяемо фиксируют actor, tenant scope, command, target, result, policy decision и timestamp. Обязательная audit-запись добавляется через `AuditStore` идемпотентной append-операцией с integrity metadata. Для security-sensitive операции запись должна быть атомарна с изменением authoritative state либо надёжно сохранена как обязательная предпосылка; сбой append, integrity или authorization не допускает изменения domain state. Retention не разрешает преждевременное удаление, а чтение и экспорт audit records всегда tenant-scoped и отдельно авторизованы.
+Audit events неизменяемо фиксируют actor, project scope, command, target, result, policy decision и timestamp. Обязательная audit-запись добавляется через `AuditStore` идемпотентной append-операцией с integrity metadata. Для security-sensitive операции запись должна быть атомарна с изменением authoritative state либо надёжно сохранена как обязательная предпосылка; сбой append, integrity или authorization не допускает изменения domain state. Retention не разрешает преждевременное удаление, а чтение и экспорт audit records всегда project-scoped и отдельно авторизованы.
 
 ## 17. Порты и границы модулей
 
@@ -358,20 +352,20 @@ Domain modules зависят от портов, а adapters реализуют 
 
 | Порт | Нормативный контракт |
 |---|---|
-| Repositories (`TenantRepository`, `ProjectRepository`, `CampaignRepository`, `WorkloadRepository`, `FindingRepository`) | Загружать и атомарно сохранять tenant-scoped aggregates с optimistic concurrency; поддерживать изменение desired state вместе с durable event |
+| Repositories (`ProjectRepository`, `CampaignRepository`, `WorkloadRepository`, `FindingRepository`) | Загружать и атомарно сохранять project-scoped aggregates с optimistic concurrency; поддерживать изменение desired state вместе с durable event |
 | `EventPublisher` | Публиковать сохранённые domain events с семантикой at least once, сохраняя aggregate identity и sequence |
 | `BuildExecutor` | Выполнять build operation по immutable inputs внутри ExecutionAttempt, принадлежащего build Task; возвращать provenance и artifact digest, не создавая попытку от имени Build |
 | `ExecutionBackend` | Идемпотентно start/observe/checkpoint/stop workload; возвращать capabilities и opaque `BackendResourceRef` |
 | `ResourceAdmission` | Выдавать, продлевать, отзывать и освобождать `ResourceLease` по quotas, priority и policy |
 | `CorpusStore` | Публиковать и читать immutable snapshots, проверять checksums и менять canonical reference через compare-and-swap по expected snapshot identity и version |
-| `ArtifactStore` | Публиковать и читать content-addressed artifacts с integrity и tenant authorization |
+| `ArtifactStore` | Публиковать и читать content-addressed artifacts с integrity и project authorization |
 | `CoverageAnalyzer` | Нормализовать coverage в совместимой epoch и определять growth без backend-specific semantics |
 | `FindingNormalizer` | Создавать версионированный CrashReport из immutable occurrence, не изменяя source fact |
 | `FindingDeduplicator` | Принимать версионированное и объяснимое merge/split решение для Finding |
 | `TaskExecutor` | Маршрутизировать конечные Task через общий execution contract и возвращать typed output references |
 | `IdentityProvider` | Подтверждать identity и memberships; authorization остаётся обязанностью Control Plane |
 | `FindingSink` | Идемпотентно экспортировать Finding во внешнюю систему без передачи ей authoritative ownership |
-| `AuditStore` | Идемпотентно добавлять immutable tenant-scoped audit records; обеспечивать integrity, retention и авторизованный доступ; fail closed без изменения security-sensitive state, если обязательную запись нельзя надёжно сохранить |
+| `AuditStore` | Идемпотентно добавлять immutable project-scoped audit records; обеспечивать integrity, retention и авторизованный доступ; fail closed без изменения security-sensitive state, если обязательную запись нельзя надёжно сохранить |
 
 Входные порты API отвечают за validation, authentication, authorization и idempotency key. Policy modules принимают domain facts и возвращают решения без прямых infrastructure calls. Adapter-specific configuration находится за composition boundary.
 
@@ -393,21 +387,20 @@ Domain modules зависят от портов, а adapters реализуют 
 ## 19. Архитектурные инварианты
 
 1. Control Plane является единственным владельцем authoritative domain state; observations инфраструктуры не заменяют его.
-2. Каждый Project принадлежит ровно одному Tenant, а любой доступ к данным и операциям tenant-scoped.
-3. Цепочка `Tenant → Project → Campaign → FuzzJob → ExecutionAttempt` не может пересекать tenant boundary.
-4. Любой ExecutionAttempt принадлежит ровно одному FuzzJob или Task; retry создаёт новую попытку и сохраняет историю предыдущей.
-5. ExecutionAttempt описывает попытку исполнения, а `BackendResourceRef` остаётся opaque и не участвует в domain identity или lifecycle rules.
-6. Изменение desired state и durable domain event атомарны; внешние side effects выполняются только после сохранения intent.
-7. Consumers, reconcilers и adapters идемпотентны при повторной доставке команд, событий и observations.
-8. `observedGeneration` никогда не опережает `generation`, а stale update не откатывает более новое или terminal состояние.
-9. FuzzJob и Task не запускаются без действующего ResourceLease того же Tenant и совместимого resource request.
-10. BuildArtifact и CorpusSnapshot immutable, content-verified и становятся видимыми только после полной успешной публикации.
-11. Canonical CorpusSnapshot меняется только через CAS по expected snapshot identity и version; conflict не заменяет ссылку и требует повторного merge с актуальным canonical input.
-12. Потребляющие FuzzJob/Task и их ExecutionAttempt ссылаются на точный `artifactDigest`; если сборка исполняется, build Task/attempt вместо будущего output фиксирует immutable SourceRevision, BuildRecipe, build environment и input references, а provenance опубликованного или найденного в cache результата ведёт к исходному исполнению.
-13. Resume использует только последний успешно опубликованный совместимый CorpusSnapshot.
-14. Окно `noCoverageGrowthFor` считается по active time отдельно для каждого FuzzJob и не включает queue, build, pause, preemption или recovery.
-15. `artifactDigest` задаёт provenance, а `coverageCompatibilityKey` — семантическую совместимость; только несовместимый key начинает новую coverage epoch и сбрасывает её окно стагнации.
-16. FindingOccurrence неизменяем; CrashReport и deduplication decisions версионированы; повтор исправленной проблемы может создать `REOPENED`.
-17. Временная потеря одной попытки не переводит Campaign в `FAILED`; terminal outcome вычисляется по полезному исполнению и обязательным jobs.
-18. Pause и preemption после checkpoint deadline обязательно останавливают workload; terminal attempt и release lease допустимы только после подтверждённой остановки либо execution fencing.
-19. Ни один workload не получает credentials Control Plane и не может самостоятельно ослабить `ExecutionPolicy`.
+2. Доступ к `Project` и операциям над его сущностями авторизуется через `ProjectAccessGrant` соответствующей `Group`.
+3. Любой ExecutionAttempt принадлежит ровно одному FuzzJob или Task; retry создаёт новую попытку и сохраняет историю предыдущей.
+4. ExecutionAttempt описывает попытку исполнения, а `BackendResourceRef` остаётся opaque и не участвует в domain identity или lifecycle rules.
+5. Изменение desired state и durable domain event атомарны; внешние side effects выполняются только после сохранения intent.
+6. Consumers, reconcilers и adapters идемпотентны при повторной доставке команд, событий и observations.
+7. `observedGeneration` никогда не опережает `generation`, а stale update не откатывает более новое или terminal состояние.
+8. FuzzJob и Task не запускаются без действующего ResourceLease того же Project и совместимого resource request.
+9. BuildArtifact и CorpusSnapshot immutable, content-verified и становятся видимыми только после полной успешной публикации.
+10. Canonical CorpusSnapshot меняется только через CAS по expected snapshot identity и version; conflict не заменяет ссылку и требует повторного merge с актуальным canonical input.
+11. Потребляющие FuzzJob/Task и их ExecutionAttempt ссылаются на точный `artifactDigest`; если сборка исполняется, build Task/attempt вместо будущего output фиксирует immutable SourceRevision, BuildRecipe, build environment и input references, а provenance опубликованного или найденного в cache результата ведёт к исходному исполнению.
+12. Resume использует только последний успешно опубликованный совместимый CorpusSnapshot.
+13. Окно `noCoverageGrowthFor` считается по active time отдельно для каждого FuzzJob и не включает queue, build, pause, preemption или recovery.
+14. `artifactDigest` задаёт provenance, а `coverageCompatibilityKey` — семантическую совместимость; только несовместимый key начинает новую coverage epoch и сбрасывает её окно стагнации.
+15. FindingOccurrence неизменяем; CrashReport и deduplication decisions версионированы; повтор исправленной проблемы может создать `REOPENED`.
+16. Временная потеря одной попытки не переводит Campaign в `FAILED`; terminal outcome вычисляется по полезному исполнению и обязательным jobs.
+17. Pause и preemption после checkpoint deadline обязательно останавливают workload; terminal attempt и release lease допустимы только после подтверждённой остановки либо execution fencing.
+18. Ни один workload не получает credentials Control Plane.

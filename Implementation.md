@@ -62,8 +62,6 @@ Control Plane хранит единственное authoritative domain state. 
 | BuildKit | [LICENSE](https://github.com/moby/buildkit/blob/master/LICENSE) | [политика выпусков](https://github.com/moby/buildkit/blob/master/PROJECT.md), [выпуски](https://github.com/moby/buildkit/releases) | Release, daemon/client images и dependencies не выбраны | License review, security review и проверка API/runtime compatibility |
 | Go CDK | [LICENSE](https://github.com/google/go-cloud/blob/master/LICENSE) | [выпуски](https://github.com/google/go-cloud/releases), [метаданные модуля](https://github.com/google/go-cloud/blob/master/go.mod) | Module version и providers не выбраны | License review каждого driver/provider, security review и parity suite |
 | CASR | [LICENSE](https://github.com/ispras/casr/blob/master/LICENSE) | [выпуски](https://github.com/ispras/casr/releases) | Release/container digest и parser profiles не выбраны | License review, security review privileged profiles и golden suite |
-| gVisor | [LICENSE](https://github.com/google/gvisor/blob/master/LICENSE) | [официальная установка](https://gvisor.dev/docs/user_guide/install/), [выпуски](https://github.com/google/gvisor/releases) | Release и runtime image digest не выбраны | License review, security review и compatibility/performance PoC |
-| Kata Containers | [LICENSE](https://github.com/kata-containers/kata-containers/blob/main/LICENSE) | [модель выпусков](https://github.com/kata-containers/kata-containers/blob/main/docs/Release-Process.md), [поддерживаемые версии](https://github.com/kata-containers/kata-containers/security) | Release, runtime и guest image digests не выбраны | License review включая bundled dependencies, security review и compatibility/performance PoC |
 | ClusterFuzz, ClusterFuzzLite и FuzzBench как источники и доноры | [ClusterFuzz LICENSE](https://github.com/google/clusterfuzz/blob/master/LICENSE), [ClusterFuzzLite LICENSE](https://github.com/google/clusterfuzzlite/blob/main/LICENSE), [FuzzBench LICENSE](https://github.com/google/fuzzbench/blob/master/LICENSE) | [ClusterFuzz releases](https://github.com/google/clusterfuzz/releases), официальные репозитории для commit pin: [ClusterFuzzLite](https://github.com/google/clusterfuzzlite), [FuzzBench](https://github.com/google/fuzzbench) | Revisions не выбраны; импорт кода не утверждён | License/security review обязателен до заимствования кода или ADR роли |
 | OpenID Connect Core | [политика IPR OpenID Foundation](https://openid.net/wp-content/uploads/2024/10/OIDF-Policy_IPR-Policy_Final_2024-10-19.pdf) | [OpenID Connect Core 1.0](https://openid.net/specs/openid-connect-core-1_0.html) | Adapter и provider не выбраны | License/IPR и security review выбранной реализации и provider |
 
@@ -71,20 +69,20 @@ Control Plane хранит единственное authoritative domain state. 
 
 | Архитектурный порт | Кандидат реализации | Статус | Обоснование | Основные риски | Обязательная проверка |
 |---|---|---|---|---|---|
-| Repositories | Собственные adapters; persistence technology открыта | `PROPOSED` | Domain interfaces не должны зависеть от схемы конкретной БД | Нет доказательств atomic aggregate/event update, optimistic concurrency и tenant isolation | PoC атомарности, conflict handling, migrations и восстановления |
+| Repositories | Собственные adapters; persistence technology открыта | `PROPOSED` | Domain interfaces не должны зависеть от схемы конкретной БД | Нет доказательств atomic aggregate/event update, optimistic concurrency и project-scoped ownership | PoC атомарности, conflict handling, migrations и восстановления |
 | `EventPublisher` | Transactional outbox relay; transport открыт | `PROPOSED` | Сохраняет событие вместе с intent и допускает at least once delivery | Дубликаты, нарушение aggregate order, потеря wake-up | Crash-injection PoC outbox и consumer deduplication |
 | `BuildExecutor` | OSS-Fuzz conventions поверх BuildKit adapter | `PROPOSED` | Даёт исходную модель build environment и изолируемый build engine | Нестабильный helper interface, cache leakage, недетерминированный fingerprint | Совместимость runner, provenance, cache isolation, cancel/timeout |
 | `ExecutionBackend` | Собственный Kubernetes adapter | `PROPOSED` | Kubernetes предоставляет физические Pod/Job resources, но не domain lifecycle | Скрытые retries, duplicate starts, stale watches, UID reuse assumptions | Attempt/Pod UID mapping, loss/retry, idempotent stop/checkpoint |
-| `ResourceAdmission` | Kueue adapter | `PROPOSED` | Кандидат на quotas, priority, fair sharing и preemption | Kueue semantics не равны `ResourceLease`; удаление Pod при preemption | Long-running Pod, lease, tenant quotas, fair sharing и deletion PoC |
+| `ResourceAdmission` | Kueue adapter | `PROPOSED` | Кандидат на quotas, priority, fair sharing и preemption | Kueue semantics не равны `ResourceLease`; удаление Pod при preemption | Long-running Pod, lease, project quotas, fair sharing и deletion PoC |
 | `CorpusStore` | Собственный интерфейс; Go CDK `blob` как возможный byte adapter | `PROPOSED` | Domain CAS и compatibility rules нельзя делегировать generic blob API | Разные conditional writes и consistency у providers | CAS, checksums, streaming, provider parity и immutable publish |
-| `ArtifactStore` | Собственный интерфейс; Go CDK `blob` как возможный byte adapter | `PROPOSED` | Нужны content addressing, integrity и tenant authorization | Partial visibility, большие объекты, cross-tenant dedup leakage | Atomic visibility, restore, checksums, streaming и authorization |
+| `ArtifactStore` | Собственный интерфейс; Go CDK `blob` как возможный byte adapter | `PROPOSED` | Нужны content addressing, integrity и project authorization | Partial visibility, большие объекты, cross-project dedup leakage | Atomic visibility, restore, checksums, streaming и authorization |
 | `CoverageAnalyzer` | Собственный normalizer; OSS-Fuzz/FuzzBench как reference | `PROPOSED` | Stop policy требует backend-independent coverage epoch | Несовместимые instrumentation и двойной учёт telemetry | Совместимые разные artifacts, несовместимые keys и active-time accounting |
 | `FindingNormalizer` | CASR за parser/normalizer boundary | `PROPOSED` | CASR умеет разбирать crash reports, но domain `CrashReport` принадлежит платформе | Format drift, nondeterminism, `ptrace` и sandbox weakening | Golden corpus, versioning, deterministic output и security review |
 | `FindingDeduplicator` | Собственная versioned policy; CASR как один из signals | `PROPOSED` | Merge/split должен быть объясним и сохранять rule version | Нестабильные keys и ошибочный merge разных defects | Replay, merge/split evidence и `REOPENED` scenarios |
 | `TaskExecutor` | Kubernetes Job adapter | `PROPOSED` | Job подходит как envelope конечной работы | Replacement Pods и backend retries могут скрыть новые attempts | `backoffLimit`, `podFailurePolicy`, Pod UID и idempotency PoC |
-| `IdentityProvider` | OIDC adapter | `PROPOSED` | Authentication отделяется от domain authorization | Token validation, revocation и membership staleness | Issuer/audience/key rotation и tenant-membership tests |
+| `IdentityProvider` | OIDC adapter | `PROPOSED` | Authentication отделяется от domain authorization | Token validation, revocation и membership staleness | Issuer/audience/key rotation и group-membership tests |
 | `FindingSink` | Собственные provider-specific adapters | `PROPOSED` | Внешний tracker не получает authoritative ownership | Duplicate issues, disclosure и credential scope | Idempotency, redaction, retry и reconciliation tests |
-| `AuditStore` | Собственный append-only adapter; persistence technology открыта | `PROPOSED` | Обязательная audit-запись должна быть immutable и fail closed относительно security-sensitive state | Неатомарная запись, tampering, преждевременная retention deletion, cross-tenant read | Fault-injection PoC atomic/fail-closed append, integrity, retention и access control |
+| `AuditStore` | Собственный append-only adapter; persistence technology открыта | `PROPOSED` | Обязательная audit-запись должна быть immutable и fail closed относительно security-sensitive state | Неатомарная запись, tampering, преждевременная retention deletion, cross-project read | Fault-injection PoC atomic/fail-closed append, integrity, retention и access control |
 
 ## 5. Persistence и события
 
@@ -92,7 +90,7 @@ Persistence technology намеренно не выбрана. Ни SQL product,
 
 - атомарно сохраняет изменение aggregate и соответствующий durable domain event;
 - применяет optimistic concurrency по version token и не принимает stale `generation`/`observedGeneration`;
-- обеспечивает tenant-scoped keys, queries, transactions, backups и audit access;
+- обеспечивает project-scoped keys, queries, transactions, backups и audit access;
 - сохраняет immutable facts и terminal history;
 - позволяет восстанавливать outbox relay после сбоя без потери события;
 - поддерживает aggregate identity и sequence для at least once delivery;
@@ -105,9 +103,9 @@ Canonical corpus reference также требует optimistic transaction ил
 
 ### AuditStore
 
-Кандидат `AuditStore` — собственный append-only adapter со статусом `PROPOSED`; конкретная persistence/WORM technology не выбрана. Security-sensitive transition допускается только если immutable audit record с operation key, actor, tenant scope, policy decision, target, result и timestamp сохранён в той же атомарной единице с authoritative state либо как доказуемая fail-closed предпосылка. Append повторяется идемпотентно, но существующая запись не перезаписывается.
+Кандидат `AuditStore` — собственный append-only adapter со статусом `PROPOSED`; конкретная persistence/WORM technology не выбрана. Security-sensitive transition допускается только если immutable audit record с operation key, actor, project scope, policy decision, target, result и timestamp сохранён в той же атомарной единице с authoritative state либо как доказуемая fail-closed предпосылка. Append повторяется идемпотентно, но существующая запись не перезаписывается.
 
-PoC должен внедрять сбой до append, после append до state commit и во время retry; ни один сценарий не должен оставлять применённый security-sensitive state без обязательной записи. Отдельно проверяются tamper detection, запрет premature deletion по retention policy, tenant-scoped read/export, denied cross-tenant access, backup/restore integrity и недоступность audit backend. Scope, pins и evidence path пока отсутствуют, поэтому критерии не повышают статус выше `PROPOSED`.
+PoC должен внедрять сбой до append, после append до state commit и во время retry; ни один сценарий не должен оставлять применённый security-sensitive state без обязательной записи. Отдельно проверяются tamper detection, запрет premature deletion по retention policy, project-scoped read/export, denied cross-project access, backup/restore integrity и недоступность audit backend. Scope, pins и evidence path пока отсутствуют, поэтому критерии не повышают статус выше `PROPOSED`.
 
 ## 6. Reconciliation process
 
@@ -156,11 +154,11 @@ Checkpoint deadline инициирует force-delete/stop, но terminal `CANCE
 
 ## 8. ResourceAdmission
 
-Kueue имеет статус `PROPOSED`. Его официальная модель включает `ClusterQueue`, tenant-oriented `LocalQueue`, quota reservation, fair sharing и preemption ([Kueue Concepts](https://kueue.sigs.k8s.io/docs/concepts/)). Эти объекты не включаются в domain model: adapter отображает их observations в собственный `ResourceLease`.
+Kueue имеет статус `PROPOSED`. Его официальная модель включает `ClusterQueue`, `LocalQueue` на уровне `Project`, quota reservation, fair sharing и preemption ([Kueue Concepts](https://kueue.sigs.k8s.io/docs/concepts/)). Эти объекты не включаются в domain model: adapter отображает их observations в собственный `ResourceLease`.
 
 Обязательное отображение:
 
-- `ResourceLease` сохраняет workload, `tenantId`, optional `projectId`, normalized resource request, priority, policy decision reference, `issuedAt`, `expiresAt` и lease identity;
+- `ResourceLease` сохраняет workload, `projectId`, normalized resource request, priority, policy decision reference, `issuedAt`, `expiresAt` и lease identity;
 - Kueue admission не считается lease, пока Control Plane не сохранил все эти поля и не подтвердил их совместимость;
 - lease имеет только `ACTIVE → RELEASED|REVOKED|EXPIRED`; terminal lease не реактивируется, renewal допустим только для `ACTIVE`;
 - revoke, expiry или preemption без созданного attempt отменяют admission и requeue workload без checkpoint; при `STARTING`/`RUNNING` они инициируют checkpoint/stop и сохраняют attempt history;
@@ -171,7 +169,7 @@ Kueue имеет статус `PROPOSED`. Его официальная моде
 - admission long-running Pod и устойчивость reservation в течение fuzzing interval;
 - preemption/deletion semantics, checkpoint deadline, fencing и отображение текущего attempt в `CANCELLED` с причиной `PREEMPTED` только после quiescence;
 - повторный admission только через новый `ResourceLease` и новый `ExecutionAttempt`;
-- fair sharing между tenants, project quotas, priority и запрет cross-tenant borrowing без явной policy;
+- fair sharing между Project, priority и запрет borrowing квоты чужого Project без явной policy;
 - lease expiry/renewal при потере Kueue observations, включая отзыв до создания attempt;
 - отсутствие скрытого restart, который обходит Control Plane.
 
@@ -180,8 +178,8 @@ Kueue имеет статус `PROPOSED`. Его официальная моде
 Откуда берётся сам `normalized resource request` (сколько CPU/RAM нужно target'у), архитектура не фиксирует. Кандидат со статусом `PROPOSED`:
 
 - target объявляет в репозитории закрытый resource-профиль (например `small`/`standard`/`large`), а не произвольные числа CPU/RAM — по аналогии с `<target>.options` в OSS-Fuzz, но не смешиваясь с ним: `rss_limit_mb`/`timeout` там остаются порогом самого фаззера для детекции OOM/hang, а не инфраструктурным resource request;
-- `Resource Admission` обязан валидировать и при необходимости клэмпить объявленный профиль по tenant `resource policy` до создания Kueue `Workload` — так же, как Kubernetes `LimitRange` подставляет default и отклоняет значения вне диапазона до `ResourceQuota`/`ClusterQueue` nominal quota;
-- отсутствие профиля в репозитории получает safe default той же tenant policy, а не отказ в приёме заявки.
+- `Resource Admission` обязан валидировать и при необходимости клэмпить объявленный профиль по `resource policy` конкретного `Project` до создания Kueue `Workload` — так же, как Kubernetes `LimitRange` подставляет default и отклоняет значения вне диапазона до `ResourceQuota`/`ClusterQueue` nominal quota;
+- отсутствие профиля в репозитории получает safe default той же project policy, а не отказ в приёме заявки.
 
 ClusterFuzz как референсная fuzzing-платформа сознательно не позволяет репозиторию target'а определять инфраструктурный resource request: размер bot/VM конфигурируется централизованно на уровне job type. Это дополнительный аргумент в пользу закрытого набора tiers, а не свободных значений, объявляемых в репозитории.
 
@@ -208,9 +206,9 @@ SourceRevision + BuildRecipe
 
 OSS-Fuzz определяет project metadata, build environment, `$SRC`, `$WORK`, `$OUT`, sanitizer/engine combinations и локальные команды build/run/coverage ([официальное руководство OSS-Fuzz](https://google.github.io/oss-fuzz/getting-started/new-project-guide/)). Это полезная compatibility target, но не API платформы.
 
-BuildKit позиционируется как toolkit для воспроизводимого преобразования source в artifacts и предоставляет caching, cache import/export, разные outputs и rootless mode ([репозиторий BuildKit](https://github.com/moby/buildkit)). Наличие возможностей не доказывает tenant isolation или детерминизм; это предмет PoC.
+BuildKit позиционируется как toolkit для воспроизводимого преобразования source в artifacts и предоставляет caching, cache import/export, разные outputs и rootless mode ([репозиторий BuildKit](https://github.com/moby/buildkit)). Наличие возможностей не доказывает изоляцию build cache между Project или детерминизм; это предмет PoC.
 
-Fingerprint должен включать immutable `SourceRevision`, все значимые поля `BuildRecipe`, target, architecture, instrumentation, sanitizer, fuzzing engine, build environment image digest и версию runner contract. Cache по умолчанию tenant-scoped. Reconciler Build сначала выполняет идемпотентный cache lookup. Verified tenant-accessible hit переводит `Build PENDING → SUCCEEDED` без новой Task/попытки и сохраняет ссылку на исходный provenance. При miss он идемпотентно создаёт и связывает build Task, оставляя Build в `PENDING` до `Task RUNNING`; `BuildArtifact` публикуется только после проверки digest и manifest availability. Provenance связывает Tenant, Project, revision, recipe, исходные Build, build Task и creator attempt.
+Fingerprint должен включать immutable `SourceRevision`, все значимые поля `BuildRecipe`, target, architecture, instrumentation, sanitizer, fuzzing engine, build environment image digest и версию runner contract. Cache по умолчанию project-scoped. Reconciler Build сначала выполняет идемпотентный cache lookup. Verified cache hit переводит `Build PENDING → SUCCEEDED` без новой Task/попытки и сохраняет ссылку на исходный provenance. При miss он идемпотентно создаёт и связывает build Task, оставляя Build в `PENDING` до `Task RUNNING`; `BuildArtifact` публикуется только после проверки digest и manifest availability. Provenance связывает Project, revision, recipe, исходные Build, build Task и creator attempt.
 
 Build Task и её `ExecutionAttempt` до публикации результата получают только immutable `SourceRevision`, `BuildRecipe`, pinned build-environment reference и остальные input references. Будущий `artifactDigest` не входит в их input manifest: `BuildExecutor` возвращает его как output после integrity check. Точный `artifactDigest` обязателен до запуска только для потребляющих `FuzzJob`/Task и их attempts.
 
@@ -218,8 +216,8 @@ Build Task и её `ExecutionAttempt` до публикации результа
 
 - одинаковые значимые inputs дают одинаковый deterministic fingerprint, а изменение каждого значимого поля меняет его;
 - provenance однозначно восстанавливает полную цепочку до `SourceRevision` и `BuildRecipe`;
-- cache и artifacts разных tenants изолированы, включая error/log paths;
-- verified cache hit не создаёт Task/attempt, не переписывает creator provenance и возвращает доступный этому Tenant artifact;
+- cache и artifacts разных Project изолированы, включая error/log paths;
+- verified cache hit не создаёт Task/attempt, не переписывает creator provenance и возвращает доступный этому Project artifact;
 - artifact можно восстановить по digest после очистки локального worker state;
 - cancel и timeout останавливают build attempt, не публикуют partial artifact и сохраняют `CANCELLED`/`FAILED` по архитектурной причине;
 - повтор после transient failure создаёт новый `ExecutionAttempt`, но не второй attempt от имени `Build`;
@@ -253,14 +251,14 @@ Go CDK предоставляет общий `blob` API и provider drivers, п�
 - потоковая запись и чтение больших объектов без загрузки всего содержимого в память;
 - checksum во время transfer и повторная проверка перед publication;
 - content-addressed immutable keys и запрет overwrite с иным содержимым;
-- tenant authorization до lookup, чтобы знание digest не давало право чтения;
+- project authorization до lookup, чтобы знание digest не давало право чтения;
 - partial uploads невидимы domain state и удаляются recovery/retention process;
 - одинаковые semantics ошибок, retry и integrity для каждого поддержанного provider.
 
 Дополнительный contract `CorpusStore`:
 
 1. только полезная attempt с новым содержимым может опубликовать private campaign snapshot; failed checkpoint и отсутствие delta не создают пустой snapshot;
-2. manifest содержит digest, checksums, parent, `corpusCompatibilityKey`, Tenant, Project, Corpus и creator attempt;
+2. manifest содержит digest, checksums, parent, `corpusCompatibilityKey`, Project, Corpus и creator attempt;
 3. `CorpusMergeTask` создаётся только при наличии нового совместимого опубликованного delta, затем читает immutable inputs и фиксирует expected canonical identity/version;
 4. canonical reference меняется одним compare-and-swap;
 5. при conflict ссылка не меняется: `CorpusMergeTask` перечитывает новый canonical snapshot и повторно вычисляет merge; пустой effective delta завершает Task успешно без publication/CAS, иначе publication повторяется в пределах finite retry policy; exhaustion даёт Task `FAILED`, но не Campaign, если merge не обязательный;
@@ -284,7 +282,7 @@ immutable FindingOccurrence
 
 CASR format и cluster identity не становятся domain schema или постоянным `Finding` key. Adapter сохраняет `normalizerName`, `normalizerVersion`, input artifact digests и diagnostics. Golden tests проверяют deterministic normalization, ASAN/MSAN/UBSAN и malformed/truncated reports, а replay старых occurrences — совместимость обновления.
 
-Отдельный security review обязателен для режимов, требующих GDB/core analysis. Документация CASR указывает, что Docker-сценарий с GDB использует `SYS_PTRACE` и `seccomp=unconfined` ([CASR usage](https://github.com/ispras/casr#usage)). Такой workload не получает автоматического исключения из `ExecutionPolicy`: он запускается в отдельном isolation profile после оценки threat model либо соответствующая capability отклоняется.
+Docker-сценарий CASR с GDB использует `SYS_PTRACE` и `seccomp=unconfined` ([CASR usage](https://github.com/ispras/casr#usage)) — отдельного isolation profile или security review это не требует, так как запускаемый код доверенный.
 
 Dedup PoC обязан показать объяснимые merge/split decisions, versioned rule, отсутствие переписывания occurrence/report history и переход совпавшего нового occurrence из `FIXED` Finding в `REOPENED` с audit event.
 
@@ -296,7 +294,7 @@ Coverage record хранит `artifactDigest` для provenance и отдель�
 
 Telemetry ingestion обязана дедуплицировать intervals по attempt и sequence, отклонять stale epoch и не считать один interval дважды. Normalized telemetry влияет на domain policies; infrastructure telemetry только объясняет состояние до применения явного reconciliation rule.
 
-Metrics labels имеют ограниченную cardinality. Raw input, stack trace, artifact digest, Pod UID и пользовательский текст сохраняются в logs/traces с tenant access и retention, а не в labels. Security-sensitive operation блокируется, если обязательный audit event нельзя надёжно сохранить.
+Metrics labels имеют ограниченную cardinality. Raw input, stack trace, artifact digest, Pod UID и пользовательский текст сохраняются в logs/traces с project access и retention, а не в labels. Security-sensitive operation блокируется, если обязательный audit event нельзя надёжно сохранить.
 
 PoC coverage epoch совместимости обязан проверить два разных `artifactDigest` с одинаковым `coverageCompatibilityKey` без сброса stop window, разные artifacts с несовместимыми keys с новой epoch и сбросом окна, а также неизменный artifact с изменившимся несовместимым key. Дополнительно проверяются duplicate/lost intervals, telemetry gap без ложной стагнации, pause/resume, replacement attempt и absolute deadline до первого полезного запуска с результатом Campaign `FAILED`.
 
@@ -321,36 +319,27 @@ Operation key связывает command, Task, lease и expected attempt. Typed
 
 ## 15. Identity и authorization
 
-Кандидат `IdentityProvider` — OIDC adapter со статусом `PROPOSED`; protocol contract определяется [OpenID Connect Core](https://openid.net/specs/openid-connect-core-1_0.html). Adapter подтверждает issuer, subject, audience, signature, expiry и memberships/claims, но не принимает domain authorization decisions.
+Кандидат `IdentityProvider` — OIDC adapter со статусом `PROPOSED`; protocol contract определяется [OpenID Connect Core](https://openid.net/specs/openid-connect-core-1_0.html). Adapter подтверждает issuer, subject, audience, signature, expiry и claims идентичности `User`, но не принимает domain authorization decisions.
 
 Authorization остаётся application logic Control Plane:
 
-- каждый `Project` принадлежит одному `Tenant`;
-- `Membership` связывает identity с Team и versioned role;
-- Team получает явную роль на Project, а membership в Tenant не даёт автоматический доступ ко всем Projects;
-- command, event, storage key, lease и backend operation несут проверенный tenant context;
-- изменение роли, delegation и security-sensitive action создают immutable audit event через `AuditStore`; сбой append оставляет authoritative state неизменным.
+- `User` объединяются в `Group` через `Membership`, без собственной роли на уровне membership;
+- `ProjectAccessGrant` связывает `Group` и `Project` и несёт `revisionAllowList` (допустимые revision/ref-паттерны, default — только `master`) и `capabilities` (`RUN_CAMPAIGN`, `MANAGE_OTHERS_CAMPAIGN`, `TRIAGE_FINDINGS`, `MANAGE_ACCESS`);
+- создание `Campaign` на `SourceRevision` X проверяет, что у пользователя есть `ProjectAccessGrant` на целевой `Project` с `RUN_CAMPAIGN` и X в `revisionAllowList`; другие операции проверяются по соответствующей capability;
+- command, event, storage key, lease и backend operation несут проверенный `projectId`;
+- изменение `ProjectAccessGrant`, delegation и security-sensitive action создают immutable audit event через `AuditStore`; сбой append оставляет authoritative state неизменным.
 
-PoC проверяет key rotation, expired/revoked token, issuer/audience confusion, stale membership, concurrent role update, cross-tenant identifiers и повтор idempotency key другим principal. Service identities получают минимальные short-lived credentials; workload не получает Control Plane credentials.
+PoC проверяет key rotation, expired/revoked token, issuer/audience confusion, stale membership, concurrent изменение `ProjectAccessGrant`, enforcement `revisionAllowList` (запрет запуска с revision вне allow-list) и повтор idempotency key другим principal. Service identities получают минимальные short-lived credentials; workload не получает Control Plane credentials.
 
 ## 16. Workload isolation
 
-MVP включает обязательные trust-boundary controls, а не откладывает изоляцию целиком:
+Запускаемый fuzzing-код считается доверенным: платформа не применяет отдельный isolation profile, network segmentation или security-ориентированные runtime restrictions поверх стандартного выполнения workload в кластере.
 
-- отдельные tenant-scoped namespaces/service accounts и deny-by-default network policy;
-- `restartPolicy: Never`, read-only root filesystem где возможно, dropped capabilities, seccomp profile и запрет privilege escalation;
-- resource requests/limits, ephemeral storage limits и controlled egress;
-- short-lived scoped storage credentials без Control Plane access;
-- image digests, admission policy и проверяемое применение `ExecutionPolicy` до запуска;
-- отдельные storage prefixes/keys и build cache по Tenant.
-
-Класс `STANDARD` должен быть реализован в MVP и проверен adversarial tests. Кандидаты advanced profiles имеют статус `PROPOSED`: gVisor запускает Kubernetes Pods через `RuntimeClass` ([официальный Kubernetes quick start gVisor](https://gvisor.dev/docs/user_guide/quick_start/kubernetes/)); Kata Containers использует lightweight VMs для усиленной isolation ([репозиторий Kata Containers](https://github.com/kata-containers/kata-containers)).
-
-`STRONG` и `DEDICATED` могут развиваться на следующих этапах, но backend обязан отклонить workload, если запрошенный class фактически не обеспечен. Понижение class без новой авторизованной команды запрещено. CASR/GDB profiles с `ptrace` не смешиваются с обычным fuzzing pool без отдельного ADR и security evidence.
+MVP запускает `FuzzJob`/`Task` как обычный Kubernetes Pod: `restartPolicy: Never`, стандартные resource requests/limits и ephemeral storage limits для предсказуемого scheduling, short-lived scoped storage credentials для `ArtifactStore`/`CorpusStore` и отдельные storage prefixes/keys по `Project` для организации данных (не как security-контроль).
 
 ## 17. External integrations
 
-Внешняя интеграция реализует `FindingSink` и не получает authoritative ownership. Outbound record содержит stable operation key, tenant/project scope, Finding version, redacted payload и ссылку на audit decision.
+Внешняя интеграция реализует `FindingSink` и не получает authoritative ownership. Outbound record содержит stable operation key, project scope, Finding version, redacted payload и ссылку на audit decision.
 
 Adapter обязан:
 
@@ -383,21 +372,20 @@ Adapter обязан:
 
 - Собственные domain entities, закрытые state machines, commands, idempotency и audit.
 - Repositories и `EventPublisher` с открытым выбором persistence technology и PoC atomicity/outbox.
-- `AuditStore` с fail-closed append, integrity, retention и tenant-scoped access PoC.
+- `AuditStore` с fail-closed append, integrity, retention и project-scoped access PoC.
 - Kubernetes `ExecutionBackend` для long-running Pod и `TaskExecutor` для Job с явным attempt mapping.
 - Базовый `ResourceAdmission`; Kueue включается только после прохождения целевого PoC.
 - Единственная build chain `Build → build Task → ExecutionAttempt` при cache miss, verified cache hit без новой попытки, OSS-Fuzz-compatible runner и immutable `BuildArtifact`.
 - Собственные `CorpusStore`/`ArtifactStore`, private snapshots и CAS canonical publish.
 - `FindingOccurrence → CrashReport → Finding`, начальная CASR integration за boundary.
 - Coverage epoch и `noCoverageGrowthFor` по active time.
-- Минимальные trust-boundary controls класса `STANDARD`, tenant authorization и отсутствие Control Plane credentials в workload.
+- Авторизация доступа к `Project` через `Group`/`ProjectAccessGrant` и отсутствие Control Plane credentials в workload.
 - Metrics, structured logs, traces и обязательные audit events.
 
 ### Второй этап: устойчивость и расширение
 
-- Доказанные fair sharing, tenant quotas и preemption semantics Kueue.
+- Доказанные fair sharing, project quotas и preemption semantics Kueue.
 - Reproduce, minimize, regression, fix verification и re-normalization tasks.
-- Advanced isolation profiles `STRONG` и `DEDICATED` после security/performance PoC gVisor/Kata.
 - Несколько storage providers после parity suite.
 - FindingSink adapters и disclosure workflows.
 - Automated corpus merge/prune policies, rollback и retention.
@@ -417,17 +405,17 @@ Adapter обязан:
 
 | Порт | Ссылка на архитектуру | Кандидат | Статус | Свидетельства проверки | Известные пробелы |
 |---|---|---|---|---|---|
-| Repositories | §17, invariant 6 | Собственные persistence adapters | `PROPOSED` | Результатов PoC нет | Product/schema открыты; atomicity не доказана |
-| `EventPublisher` | §8, §17, invariants 6–7 | Transactional outbox relay | `PROPOSED` | Критерии crash-injection определены; versioned scope и результатов нет | Transport/order/dedup store открыты |
-| `BuildExecutor` | §9, §17, invariant 12 | OSS-Fuzz + BuildKit adapter | `PROPOSED` | Критерии fingerprint/cache-hit/provenance определены; versioned scope и результатов нет | Cache isolation, input/output manifests и cancellation не доказаны |
-| `ExecutionBackend` | §10, §17, invariants 4–5 | Kubernetes adapter | `PROPOSED` | Attempt mapping, create-timeout lookup и fencing scenarios определены; versioned scope и результатов нет | Duplicate/replacement behavior не проверен |
-| `ResourceAdmission` | §11, §17, invariant 9 | Kueue adapter | `PROPOSED` | Long-running/preemption/no-attempt revoke scenario определён; versioned scope и результатов нет | Lease expiry и quota mapping не доказаны |
-| `CorpusStore` | §12, §17, invariants 10–11, 13 | Собственный interface; Go CDK candidate | `PROPOSED` | Delta gate и finite CAS retry criteria определены; versioned scope и результатов нет | Provider CAS/parity открыты |
-| `ArtifactStore` | §9, §17, invariant 10 | Собственный interface; Go CDK candidate | `PROPOSED` | Результатов PoC нет | Atomic visibility/large objects не проверены |
-| `CoverageAnalyzer` | §13, §17, invariants 14–15 | Собственный normalizer | `PROPOSED` | Compatibility, telemetry-gap и active-time scenarios определены; versioned scope и результатов нет | Feature stability и interval dedup не доказаны |
-| `FindingNormalizer` | §14, §17, invariant 16 | CASR adapter | `PROPOSED` | Golden/security criteria определены; versioned scope и результатов нет | Format drift и privileged modes не проверены |
-| `FindingDeduplicator` | §14, §17, invariant 16 | Versioned platform policy + CASR signals | `PROPOSED` | Replay criteria определены; versioned scope и результатов нет | Merge/split accuracy не измерена |
-| `TaskExecutor` | §7, §10, §17, invariant 4 | Kubernetes Job adapter | `PROPOSED` | Bounded retry, quiescence и rejection scenarios определены; versioned scope и результатов нет | Hidden backend retries не исключены |
+| Repositories | §17, invariant 5 | Собственные persistence adapters | `PROPOSED` | Результатов PoC нет | Product/schema открыты; atomicity не доказана |
+| `EventPublisher` | §8, §17, invariants 5–6 | Transactional outbox relay | `PROPOSED` | Критерии crash-injection определены; versioned scope и результатов нет | Transport/order/dedup store открыты |
+| `BuildExecutor` | §9, §17, invariant 11 | OSS-Fuzz + BuildKit adapter | `PROPOSED` | Критерии fingerprint/cache-hit/provenance определены; versioned scope и результатов нет | Cache isolation, input/output manifests и cancellation не доказаны |
+| `ExecutionBackend` | §10, §17, invariants 3–4 | Kubernetes adapter | `PROPOSED` | Attempt mapping, create-timeout lookup и fencing scenarios определены; versioned scope и результатов нет | Duplicate/replacement behavior не проверен |
+| `ResourceAdmission` | §11, §17, invariant 8 | Kueue adapter | `PROPOSED` | Long-running/preemption/no-attempt revoke scenario определён; versioned scope и результатов нет | Lease expiry и quota mapping не доказаны |
+| `CorpusStore` | §12, §17, invariants 9–10, 12 | Собственный interface; Go CDK candidate | `PROPOSED` | Delta gate и finite CAS retry criteria определены; versioned scope и результатов нет | Provider CAS/parity открыты |
+| `ArtifactStore` | §9, §17, invariant 9 | Собственный interface; Go CDK candidate | `PROPOSED` | Результатов PoC нет | Atomic visibility/large objects не проверены |
+| `CoverageAnalyzer` | §13, §17, invariants 13–14 | Собственный normalizer | `PROPOSED` | Compatibility, telemetry-gap и active-time scenarios определены; versioned scope и результатов нет | Feature stability и interval dedup не доказаны |
+| `FindingNormalizer` | §14, §17, invariant 15 | CASR adapter | `PROPOSED` | Golden/security criteria определены; versioned scope и результатов нет | Format drift не проверен |
+| `FindingDeduplicator` | §14, §17, invariant 15 | Versioned platform policy + CASR signals | `PROPOSED` | Replay criteria определены; versioned scope и результатов нет | Merge/split accuracy не измерена |
+| `TaskExecutor` | §7, §10, §17, invariant 3 | Kubernetes Job adapter | `PROPOSED` | Bounded retry, quiescence и rejection scenarios определены; versioned scope и результатов нет | Hidden backend retries не исключены |
 | `IdentityProvider` | §4, §15, §17, invariant 2 | OIDC adapter | `PROPOSED` | Результатов PoC нет | Provider, claims и revocation открыты |
 | `FindingSink` | §17 | Provider-specific adapters | `PROPOSED` | Результатов PoC нет | Providers и disclosure contracts открыты |
 | `AuditStore` | §15–§17 | Собственный append-only adapter | `PROPOSED` | Fault-injection, retention и access criteria определены; versioned scope и результатов нет | Persistence/WORM technology и atomic boundary открыты |
@@ -437,24 +425,23 @@ Adapter обязан:
 | Инвариант | Ссылка на архитектуру | Реализационный механизм | Статус | Свидетельства проверки | Известные пробелы |
 |---|---|---|---|---|---|
 | 1. Authoritative state только в Control Plane | §6, §19.1 | Repository + application reconciliation | `PROPOSED` | Результатов PoC нет | Persistence не выбрана |
-| 2. Tenant-scoped ownership и access | §4, §19.2 | Tenant keys, authorization, storage policy | `PROPOSED` | Результатов adversarial tests нет | Identity provider открыт |
-| 3. Ownership chain не пересекает Tenant | §5, §19.3 | Aggregate validation и foreign-key policy | `PROPOSED` | Результатов tests нет | Schema открыта |
-| 4. Один owner на attempt; retry создаёт новый | §7, §10, §19.4 | Pod UID mapping и immutable history | `PROPOSED` | Scenario определён; versioned scope и результатов нет | Job replacement не проверен |
-| 5. `BackendResourceRef` opaque | §10, §19.5 | Adapter value object | `PROPOSED` | Результатов boundary tests нет | Serialization открыта |
-| 6. Desired state и event атомарны | §6, §8, §19.6 | Transactional outbox | `PROPOSED` | Crash matrix определена; versioned scope и результатов нет | Database открыта |
-| 7. Idempotent consumers/reconcilers/adapters | §8, §19.7 | Operation keys и dedup records | `PROPOSED` | Duplicate scenarios определены; versioned scope и результатов нет | Retention window открыто |
-| 8. Stale update не откатывает state | §6, §19.8 | Version/generation compare-and-set | `PROPOSED` | Результатов race tests нет | Persistence semantics открыты |
-| 9. Запуск только с совместимым lease | §11, §19.9 | Admission gate перед backend start | `PROPOSED` | Kueue scenario определён; versioned scope и результатов нет | Expiry race не проверена |
-| 10. Artifact/snapshot immutable и verified | §9, §12, §19.10 | Digest, manifest-ready transaction | `PROPOSED` | Immutable publish scenario определён; versioned scope и результатов нет | Provider semantics не проверены |
-| 11. Canonical snapshot меняется только CAS | §12, §19.11 | Expected identity/version CAS | `PROPOSED` | Conflict scenario определён; versioned scope и результатов нет | CAS location открыта |
-| 12. Consumers используют artifact; исполняемый build attempt — inputs | §9, §19.12 | Раздельные consuming/build manifests; verified cache hit без новой attempt | `PROPOSED` | Build provenance/cache-hit/input-output criteria определены; versioned scope и результатов нет | Runner compatibility не доказана |
-| 13. Resume только с опубликованного compatible snapshot | §12, §19.13 | `corpusCompatibilityKey` и manifest readiness | `PROPOSED` | Resume scenarios определены; versioned scope и результатов нет | Conversion task не спроектирована |
-| 14. `noCoverageGrowthFor` считает healthy active time на job | §13, §19.14 | Coverage ledger per `FuzzJob` + telemetry health gate | `PROPOSED` | Time-window/gap scenario определён; versioned scope и результатов нет | Lost telemetry policy не проверена |
-| 15. Compatibility отделена от artifact provenance | §13, §19.15 | `artifactDigest` + versioned `coverageCompatibilityKey` | `PROPOSED` | Compatible/incompatible artifact matrix определена; versioned scope и результатов нет | Feature normalizer открыт |
-| 16. Finding history immutable/versioned | §14, §19.16 | Occurrence store, versioned reports/rules | `PROPOSED` | CASR replay criteria определены; versioned scope и результатов нет | Dedup quality не измерена |
-| 17. Потеря attempt не означает `Campaign FAILED` | §7, §13, §19.17 | Campaign aggregator application logic | `PROPOSED` | Результатов failure tests нет | Recovery thresholds открыты |
-| 18. Stop после checkpoint deadline обязателен | §7, §11, §19.18 | Timed checkpoint, backend stop и fencing до terminal/release | `PROPOSED` | Preemption/StopPolicy/fencing scenarios определены; versioned scope и результатов нет | Backend timing не измерен |
-| 19. Workload не получает Control Plane credentials | §15, §19.19 | Scoped workload identity и deny policy | `PROPOSED` | Результатов security tests нет | Runtime/isolation candidate открыт |
+| 2. Доступ к Project авторизуется через ProjectAccessGrant | §4, §19.2 | `Group`/`ProjectAccessGrant`, IdentityProvider | `PROPOSED` | Результатов adversarial tests нет | Identity provider открыт |
+| 3. Один owner на attempt; retry создаёт новый | §7, §10, §19.3 | Pod UID mapping и immutable history | `PROPOSED` | Scenario определён; versioned scope и результатов нет | Job replacement не проверен |
+| 4. `BackendResourceRef` opaque | §10, §19.4 | Adapter value object | `PROPOSED` | Результатов boundary tests нет | Serialization открыта |
+| 5. Desired state и event атомарны | §6, §8, §19.5 | Transactional outbox | `PROPOSED` | Crash matrix определена; versioned scope и результатов нет | Database открыта |
+| 6. Idempotent consumers/reconcilers/adapters | §8, §19.6 | Operation keys и dedup records | `PROPOSED` | Duplicate scenarios определены; versioned scope и результатов нет | Retention window открыто |
+| 7. Stale update не откатывает state | §6, §19.7 | Version/generation compare-and-set | `PROPOSED` | Результатов race tests нет | Persistence semantics открыты |
+| 8. Запуск только с совместимым lease | §11, §19.8 | Admission gate перед backend start | `PROPOSED` | Kueue scenario определён; versioned scope и результатов нет | Expiry race не проверена |
+| 9. Artifact/snapshot immutable и verified | §9, §12, §19.9 | Digest, manifest-ready transaction | `PROPOSED` | Immutable publish scenario определён; versioned scope и результатов нет | Provider semantics не проверены |
+| 10. Canonical snapshot меняется только CAS | §12, §19.10 | Expected identity/version CAS | `PROPOSED` | Conflict scenario определён; versioned scope и результатов нет | CAS location открыта |
+| 11. Consumers используют artifact; исполняемый build attempt — inputs | §9, §19.11 | Раздельные consuming/build manifests; verified cache hit без новой attempt | `PROPOSED` | Build provenance/cache-hit/input-output criteria определены; versioned scope и результатов нет | Runner compatibility не доказана |
+| 12. Resume только с опубликованного compatible snapshot | §12, §19.12 | `corpusCompatibilityKey` и manifest readiness | `PROPOSED` | Resume scenarios определены; versioned scope и результатов нет | Conversion task не спроектирована |
+| 13. `noCoverageGrowthFor` считает healthy active time на job | §13, §19.13 | Coverage ledger per `FuzzJob` + telemetry health gate | `PROPOSED` | Time-window/gap scenario определён; versioned scope и результатов нет | Lost telemetry policy не проверена |
+| 14. Compatibility отделена от artifact provenance | §13, §19.14 | `artifactDigest` + versioned `coverageCompatibilityKey` | `PROPOSED` | Compatible/incompatible artifact matrix определена; versioned scope и результатов нет | Feature normalizer открыт |
+| 15. Finding history immutable/versioned | §14, §19.15 | Occurrence store, versioned reports/rules | `PROPOSED` | CASR replay criteria определены; versioned scope и результатов нет | Dedup quality не измерена |
+| 16. Потеря attempt не означает `Campaign FAILED` | §7, §13, §19.16 | Campaign aggregator application logic | `PROPOSED` | Результатов failure tests нет | Recovery thresholds открыты |
+| 17. Stop после checkpoint deadline обязателен | §7, §11, §19.17 | Timed checkpoint, backend stop и fencing до terminal/release | `PROPOSED` | Preemption/StopPolicy/fencing scenarios определены; versioned scope и результатов нет | Backend timing не измерен |
+| 18. Workload не получает Control Plane credentials | §15, §19.18 | Scoped workload identity и deny policy | `PROPOSED` | Результатов security tests нет | — |
 
 ## 21. Реестр PoC и открытых технологических решений
 
@@ -463,19 +450,18 @@ Adapter обязан:
 | Идентификатор | Проверка | Кандидаты | Статус | Критерий завершения | Свидетельства |
 |---|---|---|---|---|---|
 | `POC-PERSIST-001` | Persistence atomicity/outbox | Persistence adapter + outbox relay | `PROPOSED` | Crash matrix не теряет committed event/state, duplicates идемпотентны, aggregate order сохранён | Versioned scope, pins и results path отсутствуют |
-| `POC-AUDIT-001` | Atomic/fail-closed audit recording | `AuditStore` + persistence adapter | `PROPOSED` | Fault injection не оставляет security-sensitive state без immutable record; tampering обнаруживается; retention и tenant-scoped access соблюдаются | Versioned scope, storage candidate, pins и results path отсутствуют |
+| `POC-AUDIT-001` | Atomic/fail-closed audit recording | `AuditStore` + persistence adapter | `PROPOSED` | Fault injection не оставляет security-sensitive state без immutable record; tampering обнаруживается; retention и project-scoped access соблюдаются | Versioned scope, storage candidate, pins и results path отсутствуют |
 | `POC-K8S-ATTEMPT-001` | Kubernetes attempt mapping | Pod/Job adapter | `PROPOSED` | Каждый Pod UID имеет один attempt; duplicate/create-timeout lookup, quick completion, replacement, watch gap, fencing и late output корректны | Versioned scope, pins и results path отсутствуют |
-| `POC-KUEUE-001` | Kueue long-running/preemption | Kueue + Plain Pods | `PROPOSED` | Admission, revoke без attempt, deletion, checkpoint deadline, fencing, new lease/attempt, fair sharing и tenant quotas подтверждены | Versioned scope, pins и results path отсутствуют |
+| `POC-KUEUE-001` | Kueue long-running/preemption | Kueue + Plain Pods | `PROPOSED` | Admission, revoke без attempt, deletion, checkpoint deadline, fencing, new lease/attempt, fair sharing и project quotas подтверждены | Versioned scope, pins и results path отсутствуют |
 | `POC-RUNNER-001` | OSS-Fuzz runner compatibility | Versioned runner + pinned OSS-Fuzz | `PROPOSED` | Golden projects проходят build/run/reproduce/coverage/cancel на pinned digests | Versioned scope, pins и results path отсутствуют |
 | `POC-BUILD-001` | Build reproducibility и isolation | OSS-Fuzz + BuildKit | `PROPOSED` | Cache lookup предшествует Task: hit не создаёт Task/attempt и сохраняет provenance, miss идемпотентно создаёт build Task с inputs без будущего output digest; isolation, restore, cancellation и timeout подтверждены | Versioned scope, pins и results path отсутствуют |
 | `POC-CORPUS-001` | Immutable corpus publish | `CorpusStore` + выбранный provider | `PROPOSED` | Failed checkpoint/empty delta не создают snapshot/merge; partial snapshot невидим; CAS conflict bounded, поглощённый delta даёт no-op; rollback сохранён | Versioned scope, provider, pins и results path отсутствуют |
 | `POC-CASR-001` | CASR security boundary | CASR parser/GDB profiles | `PROPOSED` | Golden normalization проходит; privileged paths изолированы либо отклонены; threat model reviewed | Versioned scope, pins и results path отсутствуют |
 | `POC-COVERAGE-001` | Coverage epoch compatibility | `CoverageAnalyzer` | `PROPOSED` | Совместимый key не сбрасывает stop window; несовместимый создаёт epoch; intervals не удваиваются; telemetry gap не считается стагнацией | Versioned scope, fixtures и results path отсутствуют |
 | `POC-BLOB-001` | Storage provider parity | Go CDK `blob` и native SDK alternatives | `PROPOSED` | Conditional writes, checksums, streaming, errors и authorization одинаково удовлетворяют contracts | Кандидаты provider, versioned scope и results path отсутствуют |
-| `POC-ISOLATION-001` | Advanced isolation | gVisor/Kata | `PROPOSED` | Compatibility, escape surface, performance, checkpoint и operations измерены для `STRONG`/`DEDICATED` | Этап после MVP; versioned scope и results path отсутствуют |
-| `POC-RESPROFILE-001` | Repo resource profile → admission clamp | Закрытый набор resource-профилей target'а + клэмп в `Resource Admission` | `PROPOSED` | Профиль из репозитория детерминированно маппится в normalized resource request; `Resource Admission` клэмпит или отклоняет профиль вне tenant policy до создания Kueue `Workload`; отсутствующий профиль получает safe default | Versioned scope, набор tiers и results path отсутствуют |
+| `POC-RESPROFILE-001` | Repo resource profile → admission clamp | Закрытый набор resource-профилей target'а + клэмп в `Resource Admission` | `PROPOSED` | Профиль из репозитория детерминированно маппится в normalized resource request; `Resource Admission` клэмпит или отклоняет профиль вне project policy до создания Kueue `Workload`; отсутствующий профиль получает safe default | Versioned scope, набор tiers и results path отсутствуют |
 
-Открытыми остаются persistence product, audit storage/WORM mechanism, event transport, blob providers, OIDC provider, exact Kubernetes/Kueue versions, sandbox mapping, FindingSink providers и схема resource-профилей target'ов. Любое закрытие решения требует результатов соответствующего PoC, license/security review и ADR; изменение архитектурного контракта вместо этого требует правки `Architecture.md`.
+Открытыми остаются persistence product, audit storage/WORM mechanism, event transport, blob providers, OIDC provider, exact Kubernetes/Kueue versions, FindingSink providers и схема resource-профилей target'ов. Любое закрытие решения требует результатов соответствующего PoC, license/security review и ADR; изменение архитектурного контракта вместо этого требует правки `Architecture.md`.
 
 ## 22. Репозитории и первичные источники
 
@@ -493,6 +479,4 @@ Adapter обязан:
 - [ClusterFuzz](https://github.com/google/clusterfuzz) — donor/reference project.
 - [ClusterFuzzLite](https://github.com/google/clusterfuzzlite) — CI workflow reference.
 - [FuzzBench](https://github.com/google/fuzzbench) — benchmarking и coverage analysis reference.
-- [gVisor Kubernetes Quick Start](https://gvisor.dev/docs/user_guide/quick_start/kubernetes/) — Kubernetes `RuntimeClass` integration candidate.
-- [Kata Containers](https://github.com/kata-containers/kata-containers) — lightweight VM isolation candidate.
 - [OpenID Connect Core](https://openid.net/specs/openid-connect-core-1_0.html) — authentication protocol reference.
