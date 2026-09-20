@@ -175,6 +175,16 @@ Kueue имеет статус `PROPOSED`. Его официальная моде
 - lease expiry/renewal при потере Kueue observations, включая отзыв до создания attempt;
 - отсутствие скрытого restart, который обходит Control Plane.
 
+### Источник величины resource request
+
+Откуда берётся сам `normalized resource request` (сколько CPU/RAM нужно target'у), архитектура не фиксирует. Кандидат со статусом `PROPOSED`:
+
+- target объявляет в репозитории закрытый resource-профиль (например `small`/`standard`/`large`), а не произвольные числа CPU/RAM — по аналогии с `<target>.options` в OSS-Fuzz, но не смешиваясь с ним: `rss_limit_mb`/`timeout` там остаются порогом самого фаззера для детекции OOM/hang, а не инфраструктурным resource request;
+- `Resource Admission` обязан валидировать и при необходимости клэмпить объявленный профиль по tenant `resource policy` до создания Kueue `Workload` — так же, как Kubernetes `LimitRange` подставляет default и отклоняет значения вне диапазона до `ResourceQuota`/`ClusterQueue` nominal quota;
+- отсутствие профиля в репозитории получает safe default той же tenant policy, а не отказ в приёме заявки.
+
+ClusterFuzz как референсная fuzzing-платформа сознательно не позволяет репозиторию target'а определять инфраструктурный resource request: размер bot/VM конфигурируется централизованно на уровне job type. Это дополнительный аргумент в пользу закрытого набора tiers, а не свободных значений, объявляемых в репозитории.
+
 ## 9. BuildExecutor и BuildArtifact
 
 OSS-Fuzz и BuildKit имеют статус `PROPOSED`. Они являются кандидатами внутри `BuildExecutor`, а не владельцами `Build` lifecycle.
@@ -463,8 +473,9 @@ Adapter обязан:
 | `POC-COVERAGE-001` | Coverage epoch compatibility | `CoverageAnalyzer` | `PROPOSED` | Совместимый key не сбрасывает stop window; несовместимый создаёт epoch; intervals не удваиваются; telemetry gap не считается стагнацией | Versioned scope, fixtures и results path отсутствуют |
 | `POC-BLOB-001` | Storage provider parity | Go CDK `blob` и native SDK alternatives | `PROPOSED` | Conditional writes, checksums, streaming, errors и authorization одинаково удовлетворяют contracts | Кандидаты provider, versioned scope и results path отсутствуют |
 | `POC-ISOLATION-001` | Advanced isolation | gVisor/Kata | `PROPOSED` | Compatibility, escape surface, performance, checkpoint и operations измерены для `STRONG`/`DEDICATED` | Этап после MVP; versioned scope и results path отсутствуют |
+| `POC-RESPROFILE-001` | Repo resource profile → admission clamp | Закрытый набор resource-профилей target'а + клэмп в `Resource Admission` | `PROPOSED` | Профиль из репозитория детерминированно маппится в normalized resource request; `Resource Admission` клэмпит или отклоняет профиль вне tenant policy до создания Kueue `Workload`; отсутствующий профиль получает safe default | Versioned scope, набор tiers и results path отсутствуют |
 
-Открытыми остаются persistence product, audit storage/WORM mechanism, event transport, blob providers, OIDC provider, exact Kubernetes/Kueue versions, sandbox mapping и FindingSink providers. Любое закрытие решения требует результатов соответствующего PoC, license/security review и ADR; изменение архитектурного контракта вместо этого требует правки `Architecture.md`.
+Открытыми остаются persistence product, audit storage/WORM mechanism, event transport, blob providers, OIDC provider, exact Kubernetes/Kueue versions, sandbox mapping, FindingSink providers и схема resource-профилей target'ов. Любое закрытие решения требует результатов соответствующего PoC, license/security review и ADR; изменение архитектурного контракта вместо этого требует правки `Architecture.md`.
 
 ## 22. Репозитории и первичные источники
 
