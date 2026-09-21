@@ -7,7 +7,7 @@
 ## Частые вопросы
 
 **1. Как подразумевается запускать фаззинг: какая гранулярность, какой результат, какие сценарии применения?**
-Единица запуска, которую видит пользователь, — `Campaign`: инженер или CI указывают набор targets на конкретной source revision. Сборка (`Build`) — на уровне `Project`: один build под конкретную revision и recipe переиспользуется для всех targets и Campaign, которым он подходит (cache hit не создаёт новый build). Внутри Campaign каждый target — это независимый continuous `FuzzJob`; над ним по требованию запускаются отдельные `Task` (reproduce, minimize, corpus merge, regression-проверка). Результат — не один статус, а три независимых потока: coverage-прогресс, corpus (накопленные интересные входные данные) и дедуплицированные `Finding` после разбора и triage крашей. Сценарии: разовый прогон при код-ревью, continuous fuzzing основной ветки, regression/fix-verification после исправления бага, периодическая чистка corpus по политике.
+Единица запуска, которую видит пользователь, — `Campaign`: инженер или CI указывают набор targets на конкретной source revision. Сборка (`Build`) — на уровне `Project`: один build под конкретную revision и recipe переиспользуется для всех targets и Campaign, которым он подходит (cache hit не создаёт новый build). Внутри Campaign каждый target — это независимый continuous `FuzzJob`; над ним по требованию запускаются отдельные `Task` (reproduce, minimize, corpus merge, regression-проверка). Сам `FuzzJob` масштабируется горизонтально — это не один под, а N параллельных независимых `FuzzInstance` одного target, которые периодически синхронизируют corpus между собой (см. вопрос 6). Результат — не один статус, а три независимых потока: coverage-прогресс, corpus (накопленные интересные входные данные) и дедуплицированные `Finding` после разбора и triage крашей.
 
 **2. В чём смысл проекта, если есть ClusterFuzz / ClusterFuzzLite?**
 Мы переиспользуем их отдельные механики как reference (например, CASR для разбора крашей, OSS-Fuzz runner contract для запуска движков — см. таблицу в разделе «Предлагаемая реализация»), но не берём их как ядро платформы. ClusterFuzz исторически построен под операционную модель и инфраструктурные допущения Google и не даёт из коробки управление ресурсами через квоты/lease и audit trail поверх произвольного Kubernetes-кластера — а это то, ради чего затевается собственный Control Plane.
@@ -21,7 +21,10 @@
 Откуда берётся сама величина запроса (сколько именно CPU/RAM) — предложенный (`PROPOSED`, ещё не проверен) подход: target объявляет в репозитории закрытый resource-профиль (`small`/`standard`/`large`), а `Resource Admission` клэмпит его по project policy до отправки в Kueue — по аналогии с Kubernetes `LimitRange`/`ResourceQuota`. Подробнее — `Implementation.md`, §8.
 
 **5. До какого уровня гранулярности Control Plane позволит отслеживать/управлять фаззингом?**
-Полная цепочка: `Campaign → FuzzJob → Task → ExecutionAttempt`. Pause/stop/resume можно применять на уровне Campaign (каскадно) или отдельного FuzzJob. У каждого `ExecutionAttempt` — своя история и причина завершения (успех/потеря/отмена/preemption), а не только агрегированный статус кампании. Отдельно отслеживаются coverage epochs, corpus snapshots и путь каждого краша `FindingOccurrence → CrashReport → Finding`, включая то, какая именно попытка его нашла.
+Полная цепочка: `Campaign → FuzzJob → FuzzInstance → ExecutionAttempt` для continuous fuzzing и `Task → ExecutionAttempt` для конечной работы. Pause/stop/resume можно применять на уровне Campaign (каскадно) или отдельного FuzzJob — команда применяется сразу ко всем его `FuzzInstance`. У каждого `ExecutionAttempt` — своя история и причина завершения (успех/потеря/отмена/preemption), а не только агрегированный статус кампании. Отдельно отслеживаются coverage epochs, corpus snapshots и путь каждого краша `FindingOccurrence → CrashReport → Finding`, включая то, какой именно instance и какая попытка его нашли.
+
+**6. Как масштабируется один target — можно ли фаззить его сразу несколькими подами с разделённым corpus?**
+Да: continuous `FuzzJob` одного target — это не один под, а `FuzzInstance` (от 1 до конфигурируемого `max`, элементарная единица масштабирования). Каждый `FuzzInstance` фаззит target независимо, без синхронной координации с остальными, и периодически (с джиттером, чтобы не рестартовать все разом) публикует свои находки в общий `CorpusStore` и подтягивает оттуда актуальный canonical corpus — та же eventual-consistency модель периодической синхронизации corpus, что использует ClusterFuzz (см. вопрос 2), но через уже существующий в архитектуре механизм `CorpusMergeTask`/CAS (`Architecture.md`, §7 и §12), а не отдельный API. Число `FuzzInstance` подстраивается динамически в пределах `[min, max]`, чтобы один target не монополизировал quota кластера.
 
 ## Иерархия сущностей и доступа
 
@@ -42,9 +45,11 @@ flowchart TD
     end
 
     C1 --> FJ1["FuzzJob<br/>(на каждый выбранный target)"]
-    FJ1 --> EA1["ExecutionAttempt"]
+    FJ1 --> FI1["FuzzInstance × N<br/>(1..max, sync corpus)"]
+    FI1 --> EA1["ExecutionAttempt"]
     C2 --> FJ2["FuzzJob"]
-    FJ2 --> EA2["ExecutionAttempt"]
+    FJ2 --> FI2["FuzzInstance × N"]
+    FI2 --> EA2["ExecutionAttempt"]
 
     BATCH["CampaignBatch (опционально)<br/>только совместный просмотр статуса/находок,<br/>не владеет FuzzJob, не даёт каскадных команд"]
     C1 -.->|"входит в (0..1)"| BATCH
@@ -167,7 +172,7 @@ Kueue и Kubernetes не заменяют Control Plane. Kueue сообщает 
 |---|---|---|
 | Управление системой | Domain model, lifecycle, API, authorization, reconcilers, `Domain Scheduler` | — |
 | Выделение ресурсов | `ResourceLease`, admission gate, отображение project policy и собственный `ResourceAdmission` adapter | Kueue как кандидат для queues, quotas, fair sharing и preemption |
-| Физическое исполнение | `ExecutionBackend`/`TaskExecutor` adapters, operation keys, mapping `ExecutionAttempt ↔ Pod UID`, fencing и сбор результатов | Kubernetes Pod/Job и scheduler; controller-runtime только внутри adapter |
+| Физическое исполнение | `ExecutionBackend`/`TaskExecutor` adapters, operation keys, mapping `ExecutionAttempt ↔ Pod UID` (по одному Pod на каждый `FuzzInstance`), fencing и сбор результатов | Kubernetes Pod/Job и scheduler; controller-runtime только внутри adapter |
 | Сборка | Lifecycle `Build`, fingerprint, provenance, cache policy и `BuildExecutor` adapter | OSS-Fuzz и BuildKit как кандидаты внутри adapter |
 | Artifacts и corpus | Собственные `ArtifactStore`/`CorpusStore` interfaces, project authorization, immutable manifests и canonical CAS | Go CDK `blob` или native provider SDK после parity PoC |
 | Findings | Immutable occurrence/report history, versioned dedup policy и adapters | CASR как кандидат для parsing и normalization |

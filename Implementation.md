@@ -34,6 +34,7 @@ Control Plane хранит единственное authoritative domain state. 
 - при cache miss сборка имеет единственную цепочку `Build → build Task → ExecutionAttempt`; verified cache hit завершает Build без новой Task/попытки и сохраняет исходный provenance;
 - `Campaign` получает `COMPLETED_WITH_ERRORS`, когда полезное fuzzing-исполнение и результаты сохранены, но часть обязательных jobs завершилась невосстановимой ошибкой;
 - canonical corpus reference меняется только через compare-and-swap по expected snapshot identity и version; merge создаётся лишь при наличии нового совместимого delta;
+- continuous `FuzzJob` масштабируется горизонтально через N параллельных `FuzzInstance` в пределах `[min, max]`; self-healing, lease и `ExecutionAttempt` принадлежат каждому `FuzzInstance` отдельно, а `FuzzJob` только агрегирует их фазу и coverage epoch — число instances не расширяется состояниями Kubernetes или Kueue;
 - `BackendResourceRef` остаётся opaque и не становится domain identity;
 - build attempt фиксирует immutable inputs без будущего output digest, а потребляющие attempts используют точный `artifactDigest`;
 - `coverageCompatibilityKey` отделён от artifact provenance, и stop window сбрасывается только при несовместимости;
@@ -134,7 +135,7 @@ Model-based lifecycle suite обязана покрывать: успешный 
 | Понятие предметной области | Ресурс Kubernetes | Правило идентичности |
 |---|---|---|
 | `ExecutionAttempt` | Pod | Один Pod UID соответствует ровно одной попытке |
-| Непрерывный `FuzzJob` | Long-running Pod | Replacement Pod всегда создаёт новый `ExecutionAttempt` |
+| `FuzzInstance` (один из N параллельных instances continuous `FuzzJob`) | Long-running Pod | Replacement Pod всегда создаёт новый `ExecutionAttempt`; N подов на один `FuzzJob`, каждый со своим `ResourceLease` |
 | Конечная `Task` | Kubernetes Job | Job является envelope; каждый созданный Pod UID отображается на отдельный `ExecutionAttempt` |
 | `BackendResourceRef` | Opaque adapter value | Содержит необходимые adapter identifiers, но domain не разбирает их структуру |
 
@@ -171,7 +172,8 @@ Kueue имеет статус `PROPOSED`. Его официальная моде
 - повторный admission только через новый `ResourceLease` и новый `ExecutionAttempt`;
 - fair sharing между Project, priority и запрет borrowing квоты чужого Project без явной policy;
 - lease expiry/renewal при потере Kueue observations, включая отзыв до создания attempt;
-- отсутствие скрытого restart, который обходит Control Plane.
+- отсутствие скрытого restart, который обходит Control Plane;
+- elastic re-admission для горизонтального масштабирования `FuzzJob` (Architecture.md §7): повторный admission-запрос на дополнительный `FuzzInstance` без пересоздания `FuzzJob`, и graceful down-scale конкретного `FuzzInstance` — checkpoint best effort перед освобождением lease, тот же handshake, что при pause/stop.
 
 ### Источник величины resource request
 
@@ -374,6 +376,7 @@ Adapter обязан:
 - Repositories и `EventPublisher` с открытым выбором persistence technology и PoC atomicity/outbox.
 - `AuditStore` с fail-closed append, integrity, retention и project-scoped access PoC.
 - Kubernetes `ExecutionBackend` для long-running Pod и `TaskExecutor` для Job с явным attempt mapping.
+- Continuous `FuzzJob` в MVP запускается с единственным `FuzzInstance` (`min=max=1`); N-way горизонтальное масштабирование — второй этап.
 - Базовый `ResourceAdmission`; Kueue включается только после прохождения целевого PoC.
 - Единственная build chain `Build → build Task → ExecutionAttempt` при cache miss, verified cache hit без новой попытки, OSS-Fuzz-compatible runner и immutable `BuildArtifact`.
 - Собственные `CorpusStore`/`ArtifactStore`, private snapshots и CAS canonical publish.
@@ -389,6 +392,7 @@ Adapter обязан:
 - Несколько storage providers после parity suite.
 - FindingSink adapters и disclosure workflows.
 - Automated corpus merge/prune policies, rollback и retention.
+- Горизонтальное масштабирование `FuzzJob` через `FuzzInstance` (N параллельных подов с periodic corpus sync через `CorpusMergeTask`) и elastic re-admission по свободной quota.
 
 ### Третий этап: оптимизация
 
@@ -426,22 +430,24 @@ Adapter обязан:
 |---|---|---|---|---|---|
 | 1. Authoritative state только в Control Plane | §6, §19.1 | Repository + application reconciliation | `PROPOSED` | Результатов PoC нет | Persistence не выбрана |
 | 2. Доступ к Project авторизуется через ProjectAccessGrant | §4, §19.2 | `Group`/`ProjectAccessGrant`, IdentityProvider | `PROPOSED` | Результатов adversarial tests нет | Identity provider открыт |
-| 3. Один owner на attempt; retry создаёт новый | §7, §10, §19.3 | Pod UID mapping и immutable history | `PROPOSED` | Scenario определён; versioned scope и результатов нет | Job replacement не проверен |
+| 3. Один owner на attempt; retry создаёт новый | §7, §10, §19.3 | Pod UID mapping на `FuzzInstance`/Task и immutable history | `PROPOSED` | Scenario определён; versioned scope и результатов нет | Instance replacement не проверен |
 | 4. `BackendResourceRef` opaque | §10, §19.4 | Adapter value object | `PROPOSED` | Результатов boundary tests нет | Serialization открыта |
 | 5. Desired state и event атомарны | §6, §8, §19.5 | Transactional outbox | `PROPOSED` | Crash matrix определена; versioned scope и результатов нет | Database открыта |
 | 6. Idempotent consumers/reconcilers/adapters | §8, §19.6 | Operation keys и dedup records | `PROPOSED` | Duplicate scenarios определены; versioned scope и результатов нет | Retention window открыто |
 | 7. Stale update не откатывает state | §6, §19.7 | Version/generation compare-and-set | `PROPOSED` | Результатов race tests нет | Persistence semantics открыты |
-| 8. Запуск только с совместимым lease | §11, §19.8 | Admission gate перед backend start | `PROPOSED` | Kueue scenario определён; versioned scope и результатов нет | Expiry race не проверена |
+| 8. Запуск только с совместимым lease | §11, §19.8 | Admission gate перед backend start, per-`FuzzInstance` lease | `PROPOSED` | Kueue scenario определён; versioned scope и результатов нет | Expiry race и elastic re-admission не проверены |
 | 9. Artifact/snapshot immutable и verified | §9, §12, §19.9 | Digest, manifest-ready transaction | `PROPOSED` | Immutable publish scenario определён; versioned scope и результатов нет | Provider semantics не проверены |
 | 10. Canonical snapshot меняется только CAS | §12, §19.10 | Expected identity/version CAS | `PROPOSED` | Conflict scenario определён; versioned scope и результатов нет | CAS location открыта |
 | 11. Consumers используют artifact; исполняемый build attempt — inputs | §9, §19.11 | Раздельные consuming/build manifests; verified cache hit без новой attempt | `PROPOSED` | Build provenance/cache-hit/input-output criteria определены; versioned scope и результатов нет | Runner compatibility не доказана |
-| 12. Resume только с опубликованного compatible snapshot | §12, §19.12 | `corpusCompatibilityKey` и manifest readiness | `PROPOSED` | Resume scenarios определены; versioned scope и результатов нет | Conversion task не спроектирована |
-| 13. `noCoverageGrowthFor` считает healthy active time на job | §13, §19.13 | Coverage ledger per `FuzzJob` + telemetry health gate | `PROPOSED` | Time-window/gap scenario определён; versioned scope и результатов нет | Lost telemetry policy не проверена |
+| 12. Resume только с опубликованного compatible snapshot | §12, §19.12 | `corpusCompatibilityKey` и manifest readiness; тот же путь для periodic `FuzzInstance` sync recycle | `PROPOSED` | Resume scenarios определены; versioned scope и результатов нет | Conversion task не спроектирована; jitter/sync cadence не специфицирован |
+| 13. `noCoverageGrowthFor` считает healthy active time на job | §13, §19.13 | Coverage ledger per `FuzzJob` (wall-clock, агрегирует N `FuzzInstance`) + telemetry health gate | `PROPOSED` | Time-window/gap scenario определён; versioned scope и результатов нет | Lost telemetry policy и multi-instance aggregation не проверены |
 | 14. Compatibility отделена от artifact provenance | §13, §19.14 | `artifactDigest` + versioned `coverageCompatibilityKey` | `PROPOSED` | Compatible/incompatible artifact matrix определена; versioned scope и результатов нет | Feature normalizer открыт |
 | 15. Finding history immutable/versioned | §14, §19.15 | Occurrence store, versioned reports/rules | `PROPOSED` | CASR replay criteria определены; versioned scope и результатов нет | Dedup quality не измерена |
 | 16. Потеря attempt не означает `Campaign FAILED` | §7, §13, §19.16 | Campaign aggregator application logic | `PROPOSED` | Результатов failure tests нет | Recovery thresholds открыты |
 | 17. Stop после checkpoint deadline обязателен | §7, §11, §19.17 | Timed checkpoint, backend stop и fencing до terminal/release | `PROPOSED` | Preemption/StopPolicy/fencing scenarios определены; versioned scope и результатов нет | Backend timing не измерен |
 | 18. Workload не получает Control Plane credentials | §15, §19.18 | Scoped workload identity и deny policy | `PROPOSED` | Результатов security tests нет | — |
+| 19. FuzzInstance принадлежит ровно одному FuzzJob; count в `[min, max]` | §7, §19.19 | `FuzzJob` reconciler: desired-count tracking + elastic re-admission | `PROPOSED` | Scenario определён в design spec; versioned scope и результатов нет | Elastic down-scale race с CAS merge не проверена |
+| 20. Все FuzzInstance одного FuzzJob используют один BuildArtifact/corpusCompatibilityKey | §5, §7, §19.20 | Shared `BuildArtifact` reference при создании `FuzzInstance` | `PROPOSED` | Результатов PoC нет | Запрет смешанных revisions между instances не реализован |
 
 ## 21. Реестр PoC и открытых технологических решений
 
@@ -460,6 +466,7 @@ Adapter обязан:
 | `POC-COVERAGE-001` | Coverage epoch compatibility | `CoverageAnalyzer` | `PROPOSED` | Совместимый key не сбрасывает stop window; несовместимый создаёт epoch; intervals не удваиваются; telemetry gap не считается стагнацией | Versioned scope, fixtures и results path отсутствуют |
 | `POC-BLOB-001` | Storage provider parity | Go CDK `blob` и native SDK alternatives | `PROPOSED` | Conditional writes, checksums, streaming, errors и authorization одинаково удовлетворяют contracts | Кандидаты provider, versioned scope и results path отсутствуют |
 | `POC-RESPROFILE-001` | Repo resource profile → admission clamp | Закрытый набор resource-профилей target'а + клэмп в `Resource Admission` | `PROPOSED` | Профиль из репозитория детерминированно маппится в normalized resource request; `Resource Admission` клэмпит или отклоняет профиль вне project policy до создания Kueue `Workload`; отсутствующий профиль получает safe default | Versioned scope, набор tiers и results path отсутствуют |
+| `POC-SCALE-001` | Горизонтальное масштабирование FuzzJob | `FuzzInstance` reconciler + `CorpusStore` | `PROPOSED` | Race между elastic scale-down и CAS-конфликтом merge корректен; down-scale ниже `min` из-за quota pressure даёт recoverable `FuzzJob`, а не terminal; jittered sync-интервалы не синхронизируются массово со временем; down-scale проходит checkpoint/stop handshake | Versioned scope, pins и results path отсутствуют |
 
 Открытыми остаются persistence product, audit storage/WORM mechanism, event transport, blob providers, OIDC provider, exact Kubernetes/Kueue versions, FindingSink providers и схема resource-профилей target'ов. Любое закрытие решения требует результатов соответствующего PoC, license/security review и ADR; изменение архитектурного контракта вместо этого требует правки `Architecture.md`.
 

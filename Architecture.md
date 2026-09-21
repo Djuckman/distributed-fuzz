@@ -69,11 +69,12 @@ Control Plane владеет всеми domain entities. Execution Backend вл�
 | `FuzzTarget` | Адресуемая fuzzing-точка входа и её runtime contract | `Project` |
 | `Campaign` | Пользовательская единица управления запуском; ровно один `Project` | `Project` |
 | `CampaignBatch` | Необязательная группировка нескольких `Campaign` (в т.ч. из разных `Project`) только для совместного просмотра статуса/находок | Control Plane |
-| `FuzzJob` | Логическая непрерывная задача одного target в Campaign | `Campaign` |
+| `FuzzJob` | Логическая непрерывная задача одного target в Campaign; масштабируется горизонтально через N параллельных `FuzzInstance` | `Campaign` |
+| `FuzzInstance` | Один из N параллельных independent fuzzing-инстансов одного `FuzzJob`; владеет собственным lease и попытками, периодически синхронизирует corpus с остальными instances того же `FuzzJob` | `FuzzJob` |
 | `Build` | Процесс получения artifacts для revision и recipe | `Project` |
 | `BuildArtifact` | Immutable content-addressed результат Build | Исходный `Build`, фактически опубликовавший artifact; cache-hit Builds только ссылаются на него |
 | `Task` | Конечная работа: build, reproduce, minimize, normalization, coverage, corpus merge/prune, regression analysis или fix verification | Сущность, которая запросила работу; ссылка обязательна |
-| `ExecutionAttempt` | Одна историческая попытка физического выполнения FuzzJob или Task | Соответствующий `FuzzJob` или `Task` |
+| `ExecutionAttempt` | Одна историческая попытка физического выполнения FuzzInstance или Task | Соответствующий `FuzzInstance` или `Task` |
 | `ResourceLease` | Ограниченное по времени admission-разрешение на ресурсы | Resource Admission от имени `Project` |
 | `Corpus` | Именованная логическая линия входных данных | `Project` и `FuzzTarget` |
 | `CorpusSnapshot` | Immutable manifest конкретного состояния Corpus | `Corpus` |
@@ -84,14 +85,14 @@ Control Plane владеет всеми domain entities. Execution Backend вл�
 Обязательные отношения владения и происхождения:
 
 ```text
-Project → Campaign → FuzzJob → ExecutionAttempt
+Project → Campaign → FuzzJob → FuzzInstance → ExecutionAttempt
 Task → ExecutionAttempt
 Build → build Task → ExecutionAttempt  (только при фактическом исполнении)
 FindingOccurrence → CrashReport → Finding
 Group → ProjectAccessGrant → Project
 ```
 
-`Campaign` фиксирует выбранные targets, `SourceRevision`, build parameters, resource policy и stop policy. `FuzzJob` не привязан к worker или размещению. `ExecutionAttempt` является попыткой выполнения, а не зеркалом backend resource. Физический идентификатор хранится только как opaque `BackendResourceRef`. `CampaignBatch` не владеет `FuzzJob` и не участвует в lifecycle входящих `Campaign` — это client-facing группировка для совместного просмотра.
+`Campaign` фиксирует выбранные targets, `SourceRevision`, build parameters, resource policy и stop policy. `FuzzJob` не привязан к worker или размещению и масштабируется горизонтально через `FuzzInstance` — от 1 до N параллельных независимых instances одного target в пределах конфигурируемого `[min, max]`. `ExecutionAttempt` является попыткой выполнения конкретного `FuzzInstance` (или `Task`), а не зеркалом backend resource. Физический идентификатор хранится только как opaque `BackendResourceRef`. `CampaignBatch` не владеет `FuzzJob` и не участвует в lifecycle входящих `Campaign` — это client-facing группировка для совместного просмотра.
 
 `BuildRecipe` — immutable value object со всеми значимыми параметрами сборки и ссылкой на версию build environment. Он не является самостоятельно управляемым aggregate.
 
@@ -138,22 +139,49 @@ Recoverable build failure также не создаёт фазу или self-tr
 
 ### FuzzJob
 
+`FuzzJob` не исполняется напрямую: он владеет N параллельными `FuzzInstance` (§«FuzzInstance» ниже) и отвечает только за (1) reconciliation желаемого числа instances в пределах конфигурируемого `[min, max]` по доступной quota и (2) агрегацию фазы и coverage epoch по своим `FuzzInstance`. Собственно self-healing одной попытки, checkpoint и resume принадлежат `FuzzInstance`.
+
+| Текущая фаза | Условие | Следующая фаза | Обязательный эффект |
+|---|---|---|---|
+| `QUEUED` | admission range подтверждён (доступен хотя бы `min`) | `SCALING` | Reconciler вычисляет desired count в `[min, max]` по доступной quota, создаёт desired count `FuzzInstance` |
+| `SCALING` | ≥1 `FuzzInstance` перешёл в `RUNNING` | `RUNNING` | Начать учёт active time агрегированной coverage epoch по wall-clock `FuzzJob` |
+| `RUNNING` | периодический reconciliation tick | `RUNNING` (self-loop) | Пересчитать desired count по текущей quota/fair-share; создать недостающие либо инициировать graceful stop лишних `FuzzInstance`, не выходя за `[min, max]` |
+| `RUNNING` | `FuzzInstance` потерян (LOST/preemption/node loss) | `RUNNING` (self-loop) | Запросить replacement `FuzzInstance` независимо от остальных |
+| `QUEUED`, `SCALING`, `RUNNING` | ранее запущенная Campaign переходит к pause | `PAUSING` | Отменить admission на новые instances; для всех текущих `FuzzInstance` запросить checkpoint/stop до общего deadline |
+| `PAUSING` | все `FuzzInstance` terminal либо остановлены | `PAUSED` | Исключить период pause из active time и сохранить последний успешно опубликованный canonical snapshot |
+| `PAUSED` | Campaign возобновлена | `QUEUED` | Указать последний успешно опубликованный snapshot как input для новых `FuzzInstance` |
+| `RUNNING` | terminal condition StopPolicy выполнен на агрегированной coverage epoch, checkpoint/stop handshake завершён для всех `FuzzInstance` | `COMPLETED` | При успешном checkpoint с новым содержимым опубликовать snapshot; зафиксировать итог coverage epoch и terminal event |
+| `QUEUED`, `SCALING`, `RUNNING`, `PAUSING` или `PAUSED` | остановка Campaign либо невосстановимая ошибка | `STOPPING` | Отменить admission, прекратить recovery и остановить/fence все текущие `FuzzInstance` |
+| `STOPPING` | все `FuzzInstance` terminal | `CANCELLED` или `FAILED` | Выбрать terminal result по исходной причине и сообщить агрегатору Campaign |
+
+FuzzJob создаётся только после готовности BuildArtifact, сразу в `QUEUED`; его reconciler идемпотентно создаёт admission-запрос на первый `FuzzInstance`. Отдельные `CREATED` и `WAITING_FOR_BUILD` не используются, потому что не отражают самостоятельную работу или ожидание уже существующего FuzzJob.
+
+`[min, max]` конфигурируется per target (или per Campaign как default для всех её targets). Периодический reconciliation tick существует, чтобы один continuous target не монополизировал quota, даже когда она формально свободна: платформа может как добавлять `FuzzInstance` сверх текущего числа при появлении свободной quota, так и снимать их при её нехватке, не выходя за `[min, max]`.
+
+До перехода `FuzzJob RUNNING → COMPLETED` reconciler обязан остановить учёт active time, перевести каждый текущий `FuzzInstance` через `STOPPING` в terminal `CANCELLED` с причиной `STOP_POLICY_COMPLETED`, выполнить checkpoint best effort до deadline для каждого из них, остановить backend независимо от результата checkpoint и освободить все `ResourceLease`. Выполнение StopPolicy без этого handshake не является завершением FuzzJob.
+
+### FuzzInstance
+
+`FuzzInstance` — один из N параллельных независимых fuzzing-инстансов, на которые continuous `FuzzJob` масштабируется горизонтально: каждый фаззит тот же target самостоятельно, без синхронной координации с остальными instances, и периодически обменивается находками через `Corpus` (см. §12). Таблица переходов повторяет self-healing, которым раньше владел непосредственно `FuzzJob` — собственный `ResourceLease`, собственный `ExecutionAttempt`, собственные RECOVERING/PAUSING/STOPPING — и добавляет только периодическую синхронизацию corpus:
+
 | Текущая фаза | Условие | Следующая фаза | Обязательный эффект |
 |---|---|---|---|
 | `QUEUED` | ResourceLease выдан | `STARTING` | Создать новый ExecutionAttempt |
-| `STARTING` | попытка сообщает начало полезного fuzzing | `RUNNING` | Начать учёт active time текущей coverage epoch |
+| `STARTING` | попытка сообщает начало полезного fuzzing | `RUNNING` | Начать учёт active time для своего `ExecutionAttempt` |
+| `RUNNING` | наступил sync interval (jittered per instance, чтобы instances не рестартовали синхронно) | `SYNCING` | Запросить best-effort checkpoint локального corpus-роста |
+| `SYNCING` | checkpoint успешен | `RUNNING` | Опубликовать private interim `CorpusSnapshot`; если после merge появился новый canonical snapshot — recycle: пересоздать `ExecutionAttempt` с этим snapshot как input |
+| `SYNCING` | checkpoint не успел в течение sync-deadline | `RUNNING` | Пропустить этот sync-цикл без потери instance — sync best-effort, не должен ронять fuzzing |
 | `STARTING` или `RUNNING` | попытка стала `LOST`, recoverable `FAILED` или `CANCELLED` из-за preemption/admission loss, intent остаётся `RUNNING` | `RECOVERING` | Подтвердить terminal attempt и fencing/release прежнего lease; запросить replacement в пределах recovery policy |
-| `RECOVERING` | новый lease выдан | `STARTING` | Создать новый ExecutionAttempt с последним snapshot |
-| `QUEUED`, `STARTING`, `RUNNING` или `RECOVERING` | ранее запущенная Campaign переходит к pause | `PAUSING` | Отменить admission; для активной попытки запросить checkpoint/stop до общего deadline |
+| `RECOVERING` | новый lease выдан | `STARTING` | Создать новый ExecutionAttempt с последним canonical snapshot |
+| `QUEUED`, `STARTING`, `RUNNING`, `SYNCING` или `RECOVERING` | владеющий `FuzzJob` переходит к pause | `PAUSING` | Отменить admission; запросить checkpoint/stop до общего deadline |
 | `PAUSING` | admission отменён, attempt отсутствует или terminal, lease отсутствует или terminal | `PAUSED` | Исключить период pause из active time и сохранить последний успешный snapshot reference |
-| `PAUSED` | Campaign возобновлена | `QUEUED` | Указать последний успешно опубликованный snapshot |
-| `RUNNING` | terminal condition StopPolicy выполнен, checkpoint/stop handshake завершён, текущая попытка terminal и lease terminal | `COMPLETED` | При успешном checkpoint с новым содержимым опубликовать snapshot; зафиксировать итог coverage epoch и terminal event |
-| `QUEUED`, `STARTING`, `RUNNING`, `RECOVERING`, `PAUSING` или `PAUSED` | остановка Campaign либо невосстановимая ошибка | `STOPPING` | Отменить admission, прекратить recovery и остановить/fence текущую попытку |
-| `STOPPING` | attempt отсутствует либо terminal, lease отсутствует либо terminal | `CANCELLED` или `FAILED` | Выбрать terminal result по исходной причине и сообщить агрегатору Campaign |
+| `PAUSED` | владеющий `FuzzJob` возобновлён | `QUEUED` | Указать последний успешно опубликованный snapshot |
+| `QUEUED`, `STARTING`, `RUNNING`, `SYNCING`, `RECOVERING`, `PAUSING` или `PAUSED` | остановка владеющего `FuzzJob`, down-scale этого instance по решению `FuzzJob` либо невосстановимая ошибка | `STOPPING` | Отменить admission, прекратить recovery и остановить/fence текущую попытку |
+| `STOPPING` | attempt отсутствует либо terminal, lease отсутствует либо terminal | `CANCELLED` | Сохранить structured reason и сообщить владеющему `FuzzJob` |
 
-FuzzJob создаётся только после готовности BuildArtifact, сразу в `QUEUED`; его reconciler идемпотентно создаёт admission-запрос. Отдельные `CREATED` и `WAITING_FOR_BUILD` не используются, потому что не отражают самостоятельную работу или ожидание уже существующего FuzzJob.
+Переход `RUNNING → COMPLETED` по выполнению StopPolicy на `FuzzInstance` **не существует** — StopPolicy оценивается только на уровне `FuzzJob` по агрегированной coverage epoch (§13). `FuzzInstance` завершается терминально только по команде своего `FuzzJob` (через `STOPPING`, в том числе при down-scale), всегда как `CANCELLED` со structured reason, а не самостоятельно как `COMPLETED`.
 
-До перехода `FuzzJob RUNNING → COMPLETED` reconciler обязан остановить учёт active time, перевести текущий `ExecutionAttempt` через `STOPPING` в terminal `CANCELLED` с причиной `STOP_POLICY_COMPLETED`, выполнить checkpoint best effort до deadline, остановить backend независимо от результата checkpoint и освободить `ResourceLease`. Выполнение StopPolicy без этого handshake не является завершением FuzzJob.
+Джиттер sync-интервала обязателен: без него все `FuzzInstance` одного `FuzzJob` синхронно уходили бы в `SYNCING` и кратковременно теряли бы всю fuzzing-мощность target'а одновременно.
 
 ### ExecutionAttempt
 
@@ -289,13 +317,15 @@ Policy автоматически создаёт `CorpusMergeTask` по lifecycl
 
 Несовместимый `corpusCompatibilityKey` запрещает silent merge или resume. Требуется новая corpus line либо явная преобразующая Task, результат которой имеет новый key и provenance.
 
+Горизонтальное масштабирование continuous `FuzzJob` на N параллельных `FuzzInstance` (§7) переиспользует этот же механизм для периодической синхронизации corpus между instances, пока fuzzing ещё идёт: каждый `FuzzInstance` на `SYNCING` публикует private interim `CorpusSnapshot` своего роста, существующий policy-триггер создаёт `CorpusMergeTask` на новый совместимый delta без отдельного API, а `FuzzInstance` на следующем recycle берёт актуальный canonical snapshot как input — по тому же контракту, что и `RECOVERING → STARTING`. Синхронизация не подгружает corpus в уже работающий процесс fuzzing engine — это осознанная eventual-consistency модель, а не live reload.
+
 ## 13. Coverage и условия завершения
 
-Основной stop criterion — `StopPolicy.noCoverageGrowthFor`: отсутствие роста coverage в течение `N` активных часов. Окно считается отдельно для каждого `FuzzJob`, а не на уровне Campaign.
+Основной stop criterion — `StopPolicy.noCoverageGrowthFor`: отсутствие роста coverage в течение `N` активных часов. Окно считается отдельно для каждого `FuzzJob`, а не на уровне Campaign. Если `FuzzJob` масштабирован на несколько параллельных `FuzzInstance` (§7), окно остаётся привязано к wall-clock active time самого `FuzzJob`, а не суммируется по числу instances: рост throughput от параллелизма не должен искусственно ускорять срабатывание timeout, настроенного в календарных единицах.
 
 Active time и условия `noCoverageGrowthFor`/`maxActiveTime` начинают оцениваться только после первого подтверждённого полезного fuzzing в фазе `RUNNING`. Queue, build, pause, preemption, checkpoint, recovery и ожидание admission исключаются. Потерянные или дублированные telemetry intervals не должны дважды увеличивать active time. Отсутствие здоровой совместимой coverage telemetry не считается отсутствием роста: окно стагнации продвигается только по валидной выборке, а telemetry gap создаёт condition и recovery action.
 
-Coverage record обязан нести два независимых значения: `artifactDigest` для provenance конкретного исполнявшегося содержимого и `coverageCompatibilityKey` для семантической совместимости target, instrumentation, feature schema и normalizer contract. Разные `BuildArtifact` могут иметь одинаковый `coverageCompatibilityKey`; их совместимая telemetry объединяется в текущей epoch с сохранением provenance каждого artifact.
+Coverage record обязан нести два независимых значения: `artifactDigest` для provenance конкретного исполнявшегося содержимого и `coverageCompatibilityKey` для семантической совместимости target, instrumentation, feature schema и normalizer contract. Разные `BuildArtifact` могут иметь одинаковый `coverageCompatibilityKey`; их совместимая telemetry объединяется в текущей epoch с сохранением provenance каждого artifact. Это естественно распространяется на несколько параллельных `ExecutionAttempt` от разных `FuzzInstance` одного `FuzzJob`: все они используют один `BuildArtifact` (см. инвариант в §19) и объединяются в одну coverage epoch `FuzzJob` с сохранением provenance каждого attempt.
 
 Новая coverage epoch начинается только при изменении `coverageCompatibilityKey`, даже если `artifactDigest` не изменился. Смена одного `artifactDigest` при неизменном key не сбрасывает baseline или окно `noCoverageGrowthFor`; несовместимый key создаёт новую epoch и сбрасывает окно для неё. История старых epochs сохраняется.
 
@@ -317,7 +347,7 @@ Campaign получает:
 FindingOccurrence → CrashReport → Finding
 ```
 
-`FindingOccurrence` неизменяемо фиксирует момент обнаружения, Project, FuzzJob, ExecutionAttempt, artifact digest, input и raw outputs. Повторная обработка не изменяет occurrence.
+`FindingOccurrence` неизменяемо фиксирует момент обнаружения, Project, FuzzJob, FuzzInstance, ExecutionAttempt, artifact digest, input и raw outputs. Повторная обработка не изменяет occurrence.
 
 `FindingNormalizer` создаёт новый `CrashReport` с `normalizerName`, `normalizerVersion`, normalized stack, classification и ссылками на inputs. Смена версии нормализатора создаёт новый report и сохраняет прежние результаты для объяснимости.
 
@@ -388,19 +418,21 @@ Domain modules зависят от портов, а adapters реализуют 
 
 1. Control Plane является единственным владельцем authoritative domain state; observations инфраструктуры не заменяют его.
 2. Доступ к `Project` и операциям над его сущностями авторизуется через `ProjectAccessGrant` соответствующей `Group`.
-3. Любой ExecutionAttempt принадлежит ровно одному FuzzJob или Task; retry создаёт новую попытку и сохраняет историю предыдущей.
+3. Любой ExecutionAttempt принадлежит ровно одному FuzzInstance или Task; retry создаёт новую попытку и сохраняет историю предыдущей.
 4. ExecutionAttempt описывает попытку исполнения, а `BackendResourceRef` остаётся opaque и не участвует в domain identity или lifecycle rules.
 5. Изменение desired state и durable domain event атомарны; внешние side effects выполняются только после сохранения intent.
 6. Consumers, reconcilers и adapters идемпотентны при повторной доставке команд, событий и observations.
 7. `observedGeneration` никогда не опережает `generation`, а stale update не откатывает более новое или terminal состояние.
-8. FuzzJob и Task не запускаются без действующего ResourceLease того же Project и совместимого resource request.
+8. FuzzInstance и Task не запускаются без действующего ResourceLease того же Project и совместимого resource request.
 9. BuildArtifact и CorpusSnapshot immutable, content-verified и становятся видимыми только после полной успешной публикации.
 10. Canonical CorpusSnapshot меняется только через CAS по expected snapshot identity и version; conflict не заменяет ссылку и требует повторного merge с актуальным canonical input.
 11. Потребляющие FuzzJob/Task и их ExecutionAttempt ссылаются на точный `artifactDigest`; если сборка исполняется, build Task/attempt вместо будущего output фиксирует immutable SourceRevision, BuildRecipe, build environment и input references, а provenance опубликованного или найденного в cache результата ведёт к исходному исполнению.
-12. Resume использует только последний успешно опубликованный совместимый CorpusSnapshot.
-13. Окно `noCoverageGrowthFor` считается по active time отдельно для каждого FuzzJob и не включает queue, build, pause, preemption или recovery.
+12. Resume и periodic sync FuzzInstance используют только последний успешно опубликованный совместимый CorpusSnapshot.
+13. Окно `noCoverageGrowthFor` считается по active time отдельно для каждого FuzzJob (по его wall-clock, а не суммарно по параллельным FuzzInstance) и не включает queue, build, pause, preemption или recovery.
 14. `artifactDigest` задаёт provenance, а `coverageCompatibilityKey` — семантическую совместимость; только несовместимый key начинает новую coverage epoch и сбрасывает её окно стагнации.
 15. FindingOccurrence неизменяем; CrashReport и deduplication decisions версионированы; повтор исправленной проблемы может создать `REOPENED`.
 16. Временная потеря одной попытки не переводит Campaign в `FAILED`; terminal outcome вычисляется по полезному исполнению и обязательным jobs.
 17. Pause и preemption после checkpoint deadline обязательно останавливают workload; terminal attempt и release lease допустимы только после подтверждённой остановки либо execution fencing.
 18. Ни один workload не получает credentials Control Plane.
+19. FuzzInstance принадлежит ровно одному FuzzJob; число одновременно живых FuzzInstance под одним FuzzJob всегда находится в пределах `[min, max]`, кроме переходных окон `SCALING` и replacement после потери instance.
+20. Все FuzzInstance одного FuzzJob используют один и тот же BuildArtifact и corpusCompatibilityKey: они шардят исполнение одного target на одной ревизии, а не разные ревизии или targets.
